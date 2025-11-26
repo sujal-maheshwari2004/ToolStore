@@ -1,9 +1,11 @@
 from sentence_transformers import SentenceTransformer
-import os
 from chromadb import PersistentClient
+import re
 
 TOON_FILE = "tools.toon"
-CHROMA_DIR = "toon_chroma_db"
+CHROMA_DIR = "../toon_chroma_db"
+
+import re
 
 def parse_toon_table(filename):
     with open(filename, "r", encoding="utf-8") as f:
@@ -17,10 +19,14 @@ def parse_toon_table(filename):
             continue
         if line.startswith("  "):
             line = line[2:]
-        values = [v.replace("\\,", ",").replace("\\n", "\n") for v in line.split(",")]
+        # Split only on commas NOT preceded by a backslash
+        values = re.split(r'(?<!\\),', line)
+        # Remove escape characters for commas and newlines
+        values = [v.replace('\\,', ',').replace('\\n', '\n') for v in values]
         entry = dict(zip([f.strip() for f in fields], values))
         tools.append(entry)
     return tools
+
 
 def chunk_tools(tools):
     chunks = []
@@ -50,16 +56,6 @@ def store_in_chroma(chunks, embeddings, persist_directory):
             documents=[chunk]
         )
 
-def search_chroma(query, persist_directory):
-    client = PersistentClient(path=persist_directory)
-    collection = client.get_or_create_collection("tools")
-    results = collection.query(
-        query_texts=[query],
-        n_results=3,
-        include=["documents"]
-    )
-    return results["documents"]
-
 def main():
     tools = parse_toon_table(TOON_FILE)
     chunks = chunk_tools(tools)
@@ -69,12 +65,6 @@ def main():
     print("Storing in Chroma...")
     store_in_chroma(chunks, embeddings, CHROMA_DIR)
     print("Stored embeddings in Chroma at", CHROMA_DIR)
-    query = input("Enter a search query, or press Enter for default ('vector database'): ").strip() or "vector database"
-    results = search_chroma(query, CHROMA_DIR)
-    print("---\nSample search results:")
-    for doc in results:
-        print(doc)
-        print("---")
 
 if __name__ == "__main__":
     main()
