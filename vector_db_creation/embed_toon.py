@@ -1,67 +1,80 @@
+from sentence_transformers import SentenceTransformer
 import os
-from langchain.embeddings import OpenAIEmbeddings
+from chromadb import PersistentClient
 
 TOON_FILE = "tools.toon"
+CHROMA_DIR = "toon_chroma_db"
 
 def parse_toon_table(filename):
-    """Parse a TOON table and return a list of dicts for each row."""
     with open(filename, "r", encoding="utf-8") as f:
         lines = f.readlines()
-
     header = lines[0].strip()
-    # Parse fields from header
-    # Example: tools[3]{tool_id,tool_name,tool_description,tool_git_link}:
-    fields_part = header.split("{")[1].split("}")[0]
-    fields = [f.strip() for f in fields_part.split(",")]
-
+    fields = header.split("{")[1].split("}")[0].split(",")
     tools = []
     for line in lines[1:]:
         line = line.strip()
-        if not line:
+        if not line or line.startswith("#"):
             continue
-        if line.startswith("#"):  # Skip comment lines, if any
-            continue
-        # Remove leading indentation
         if line.startswith("  "):
             line = line[2:]
         values = [v.replace("\\,", ",").replace("\\n", "\n") for v in line.split(",")]
-        entry = dict(zip(fields, values))
+        entry = dict(zip([f.strip() for f in fields], values))
         tools.append(entry)
     return tools
 
 def chunk_tools(tools):
-    """Return a list of strings, one for each tool, formatted for embedding."""
     chunks = []
     for t in tools:
-        # Consolidate info into one string per entry
-        chunk = f"ID: {t['tool_id']}\nName: {t['tool_name']}\nDescription: {t['tool_description']}\nGit Link: {t['tool_git_link']}"
+        chunk = (
+            f"ID: {t['tool_id']}\n"
+            f"Name: {t['tool_name']}\n"
+            f"Description: {t['tool_description']}\n"
+            f"Git Link: {t['tool_git_link']}"
+        )
         chunks.append(chunk)
     return chunks
 
-def embed_chunks(chunks, openai_api_key):
-    """Embed each chunk using LangChain + OpenAI."""
-    embeddings = OpenAIEmbeddings(openai_api_key=openai_api_key)
-    # Each chunk is embedded separately
-    vectors = embeddings.embed_documents(chunks)
-    # vectors is a list of embedding vectors, one per chunk
-    return vectors
+def embed_chunks_local(chunks, model_name="all-MiniLM-L6-v2"):
+    model = SentenceTransformer(model_name)
+    embeddings = model.encode(chunks, show_progress_bar=True)
+    return embeddings
+
+def store_in_chroma(chunks, embeddings, persist_directory):
+    client = PersistentClient(path=persist_directory)
+    collection = client.get_or_create_collection("tools")
+    ids = [str(i) for i in range(len(chunks))]
+    for i, (chunk, emb) in enumerate(zip(chunks, embeddings)):
+        collection.upsert(
+            ids=[ids[i]],
+            embeddings=[emb.tolist()],
+            documents=[chunk]
+        )
+
+def search_chroma(query, persist_directory):
+    client = PersistentClient(path=persist_directory)
+    collection = client.get_or_create_collection("tools")
+    results = collection.query(
+        query_texts=[query],
+        n_results=3,
+        include=["documents"]
+    )
+    return results["documents"]
 
 def main():
-    openai_api_key = os.getenv("OPENAI_API_KEY")
-    if not openai_api_key:
-        openai_api_key = input("Enter your OpenAI API key: ").strip()
-
     tools = parse_toon_table(TOON_FILE)
     chunks = chunk_tools(tools)
-    print(f"Found {len(chunks)} entries. Embedding...")
-
-    vectors = embed_chunks(chunks, openai_api_key)
-    for i, (chunk, vec) in enumerate(zip(chunks, vectors)):
-        print(f"Entry {i+1}:")
-        print(chunk)
-        print(f"Embedding: {vec[:8]}... (truncated)\n")  # Show just start
-
-    # You may want to save vectors to a file, index, or database
+    print(f"Found {len(chunks)} entries.")
+    print("Embedding locally via sentence-transformers...")
+    embeddings = embed_chunks_local(chunks)
+    print("Storing in Chroma...")
+    store_in_chroma(chunks, embeddings, CHROMA_DIR)
+    print("Stored embeddings in Chroma at", CHROMA_DIR)
+    query = input("Enter a search query, or press Enter for default ('vector database'): ").strip() or "vector database"
+    results = search_chroma(query, CHROMA_DIR)
+    print("---\nSample search results:")
+    for doc in results:
+        print(doc)
+        print("---")
 
 if __name__ == "__main__":
     main()
