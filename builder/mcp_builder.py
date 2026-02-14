@@ -15,7 +15,7 @@ if __name__ == "__main__":
 
 class MCPBuilder:
 
-    def __init__(self, tools_dir: Path, output_file: Path):
+    def __init__(self, tools_dir: Path, output_file: Path, verbose: bool = False):
         self.tools_dir = Path(tools_dir)
         self.output_file = Path(output_file)
 
@@ -117,3 +117,4 @@ class MCPBuilder:
                 out.write(tool.strip() + "\n\n")
 
             out.write(FOOTER)
+
