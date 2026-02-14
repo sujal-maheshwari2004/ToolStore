@@ -9,3 +9,7 @@ dependencies = [
     "requests>=2.32.5",
     "sentence-transformers>=5.2.2",
 ]
+
+[project.scripts]
+toolstorepy = "toolstorepy.cli:main"
+
