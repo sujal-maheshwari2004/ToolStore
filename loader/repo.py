@@ -1,16 +1,23 @@
 import subprocess
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Optional
 
 
 class RepoLoader:
     """
     Handles cloning tool repositories into workspace.
+    Installs dependencies into a shared workspace virtual environment.
     """
 
-    def __init__(self, tools_dir: Path, install: bool = False):
+    def __init__(
+        self,
+        tools_dir: Path,
+        install: bool = False,
+        python_exec: Optional[Path] = None,
+    ):
         self.tools_dir = Path(tools_dir)
         self.install = install
+        self.python_exec = python_exec
         self.tools_dir.mkdir(parents=True, exist_ok=True)
 
     # --------------------------------------------------
@@ -18,10 +25,6 @@ class RepoLoader:
     # --------------------------------------------------
 
     def process(self, repo_urls: Iterable[str]):
-        """
-        Clone all repositories provided in repo_urls.
-        """
-
         for repo_url in repo_urls:
             self._clone_repo(repo_url)
 
@@ -34,28 +37,20 @@ class RepoLoader:
         target_path = self.tools_dir / folder_name
 
         if target_path.exists():
-            # Skip if already cloned
             return
 
-        # Clone repository
         subprocess.run(
-            ["git", "clone", repo_url, str(target_path)],
+            ["git", "clone", "--depth", "1", repo_url, str(target_path)],
             check=True,
         )
 
-        # Optionally install requirements
-        if self.install:
+        if self.install and self.python_exec:
             self._install_requirements(target_path)
 
     def _derive_folder_name(self, repo_url: str) -> str:
-        """
-        Extract repo folder name from URL.
-        """
         name = repo_url.rstrip("/").split("/")[-1]
-
         if name.endswith(".git"):
             name = name[:-4]
-
         return name
 
     def _install_requirements(self, repo_path: Path):
@@ -63,6 +58,13 @@ class RepoLoader:
 
         if requirements_file.exists():
             subprocess.run(
-                ["pip", "install", "-r", str(requirements_file)],
+                [
+                    str(self.python_exec),
+                    "-m",
+                    "pip",
+                    "install",
+                    "-r",
+                    str(requirements_file),
+                ],
                 check=True,
             )
