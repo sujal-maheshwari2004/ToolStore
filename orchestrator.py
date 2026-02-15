@@ -1,6 +1,9 @@
 from pathlib import Path
 from typing import Optional, List, Iterable
 import json
+import sys
+import subprocess
+import venv
 
 from .index.registry import resolve_index
 from .index.downloader import IndexDownloader
@@ -18,6 +21,8 @@ class ToolStorePy:
         - Semantic search
         - Repository cloning
         - MCP server synthesis
+        - Workspace virtual environment management
+        - MCP runtime launch
     """
 
     def __init__(
@@ -50,6 +55,34 @@ class ToolStorePy:
         self.tools_dir.mkdir(parents=True, exist_ok=True)
 
     # --------------------------------------------------
+    # VENV MANAGEMENT
+    # --------------------------------------------------
+
+    def _ensure_workspace_venv(self) -> Path:
+        """
+        Create or reuse workspace-level virtual environment.
+        Returns python executable path inside venv.
+        """
+        venv_path = self.workspace / ".venv"
+
+        if not venv_path.exists():
+            builder = venv.EnvBuilder(with_pip=True)
+            builder.create(venv_path)
+
+        if sys.platform == "win32":
+            python_exec = venv_path / "Scripts" / "python"
+        else:
+            python_exec = venv_path / "bin" / "python"
+
+        # Upgrade pip safely
+        subprocess.run(
+            [str(python_exec), "-m", "pip", "install", "--upgrade", "pip"],
+            check=True,
+        )
+
+        return python_exec
+
+    # --------------------------------------------------
     # PUBLIC ENTRYPOINT
     # --------------------------------------------------
 
@@ -60,33 +93,24 @@ class ToolStorePy:
         index_url: Optional[str] = None,
         force_refresh: bool = False,
     ) -> Path:
-        """
-        Full pipeline execution:
-            1. Resolve index
-            2. Download index
-            3. Load queries
-            4. Run semantic search
-            5. Clone matched repos
-            6. Build unified MCP server
-        """
 
-        # 1️⃣ Resolve index (built-in name or direct URL)
+        # 1️⃣ Resolve index
         resolved_url = resolve_index(index=index, index_url=index_url)
 
-        # 2️⃣ Download & prepare index locally
+        # 2️⃣ Download index
         downloader = IndexDownloader(self.index_dir)
         db_path = downloader.download(
             resolved_url,
             force_refresh=force_refresh
         )
 
-        # 3️⃣ Load queries from JSON
+        # 3️⃣ Load queries
         query_list = self._load_queries(queries)
 
         if not query_list:
             raise ValueError("No queries provided.")
 
-        # 4️⃣ Semantic search (1 best tool per query)
+        # 4️⃣ Semantic search
         matches = self._run_search(query_list, db_path)
 
         valid_matches = [
@@ -98,21 +122,35 @@ class ToolStorePy:
                 "No matching tools found for given queries."
             )
 
-        # 5️⃣ Deduplicate repo URLs
+        # 5️⃣ Deduplicate repos
         unique_links = {
             m["tool_git_link"]
             for m in valid_matches
         }
 
-        self._clone_repositories(unique_links)
+        # 6️⃣ Prepare workspace venv if installing deps
+        python_exec = None
+        if self.install_requirements:
+            python_exec = self._ensure_workspace_venv()
 
-        # 6️⃣ Build unified MCP server
+        # 7️⃣ Clone + install deps
+        self._clone_repositories(unique_links, python_exec)
+
+        # 8️⃣ Build unified MCP server
         builder = MCPBuilder(
             self.tools_dir,
             self.output_file,
-            verbose=self.verbose  # 👈 Pass verbose down
+            verbose=self.verbose
         )
         builder.build()
+
+        # 9️⃣ Launch MCP inside workspace venv
+        python_exec = self._ensure_workspace_venv()
+
+        subprocess.run(
+            [str(python_exec), str(self.output_file)],
+            check=True,
+        )
 
         return self.output_file
 
@@ -121,9 +159,6 @@ class ToolStorePy:
     # --------------------------------------------------
 
     def _load_queries(self, queries_path: str) -> List[str]:
-        """
-        Load queries.json and extract tool descriptions.
-        """
 
         with open(queries_path, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -140,9 +175,6 @@ class ToolStorePy:
         return queries
 
     def _run_search(self, queries: List[str], db_path: Path):
-        """
-        Execute semantic search + reranking.
-        """
 
         searcher = SemanticSearcher(
             persist_dir=db_path,
@@ -152,13 +184,20 @@ class ToolStorePy:
 
         return searcher.batch_search(queries)
 
-    def _clone_repositories(self, repo_urls: Iterable[str]):
+    def _clone_repositories(
+        self,
+        repo_urls: Iterable[str],
+        python_exec: Optional[Path],
+    ):
         """
         Clone matched repositories into workspace.
+        Install dependencies into shared workspace venv.
         """
 
         loader = RepoLoader(
             self.tools_dir,
-            install=self.install_requirements
+            install=self.install_requirements,
+            python_exec=python_exec,
         )
+
         loader.process(repo_urls)
