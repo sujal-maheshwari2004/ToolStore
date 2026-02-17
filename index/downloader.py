@@ -1,5 +1,3 @@
-# toolshop/index/downloader.py
-
 import shutil
 import zipfile
 import tarfile

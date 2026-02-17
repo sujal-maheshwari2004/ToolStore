@@ -7,7 +7,7 @@ from typing import Optional
 
 BUILTIN_INDEXES = {
     # Example placeholders — replace with real URLs
-    "core-tools": "https://example.com/core-tools-v1.zip",
+    "core-tools": "http://127.0.0.1:8080/core-tools-v1.zip",
 }
 
 

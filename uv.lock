@@ -1957,6 +1957,7 @@ dependencies = [
     { name = "chromadb" },
     { name = "requests" },
     { name = "sentence-transformers" },
+    { name = "transformers" },
 ]
 
 [package.metadata]
@@ -1964,6 +1965,7 @@ requires-dist = [
     { name = "chromadb", specifier = ">=1.5.0" },
     { name = "requests", specifier = ">=2.32.5" },
     { name = "sentence-transformers", specifier = ">=5.2.2" },
+    { name = "transformers", specifier = ">=5.1.0" },
 ]
 
 [[package]]
