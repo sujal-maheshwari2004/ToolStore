@@ -11,6 +11,7 @@ from .index.registry import resolve_index
 from .index.downloader import IndexDownloader
 from .search.semantic import SemanticSearcher
 from .loader.repo import RepoLoader
+from .loader.cache import RepoCache
 from .builder.mcp_builder import MCPBuilder
 
 
@@ -90,7 +91,6 @@ class ToolStorePy:
         else:
             python_exec = venv_path / "bin" / "python"
 
-        # Upgrade pip silently
         subprocess.run(
             [str(python_exec), "-m", "pip", "install", "--upgrade", "pip", "--quiet"],
             check=True,
@@ -98,7 +98,6 @@ class ToolStorePy:
             stderr=subprocess.DEVNULL,
         )
 
-        # Install MCP only once
         if newly_created:
             self.logger.info("Installing MCP runtime in workspace venv...")
             subprocess.run(
@@ -155,7 +154,7 @@ class ToolStorePy:
             if name:
                 self.logger.info(f"✔ Tool selected: {name}")
 
-        unique_links = {m["tool_git_link"] for m in valid_matches}
+        unique_links = list({m["tool_git_link"] for m in valid_matches})
 
         python_exec = None
         if self.install_requirements:
@@ -215,10 +214,20 @@ class ToolStorePy:
         repo_urls: Iterable[str],
         python_exec: Optional[Path],
     ):
+        repo_urls = list(repo_urls)
+        cache     = RepoCache()
+
+        missing = [u for u in repo_urls if not cache.is_cached(u)]
+        if missing:
+            self.logger.info(f"Caching {len(missing)} new repo(s) → {cache.cache_dir}")
+            cache.populate_many(missing)
+        else:
+            self.logger.info(f"All {len(repo_urls)} repo(s) served from cache.")
+
         loader = RepoLoader(
             self.tools_dir,
             install=self.install_requirements,
             python_exec=python_exec,
+            cache=cache,
         )
-
         loader.process(repo_urls)

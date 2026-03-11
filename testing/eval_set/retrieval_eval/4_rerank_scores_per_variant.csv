@@ -1,0 +1,11 @@
+variant,category,count,avg_score,median_score,min_score,max_score
+original,hits,245760,6.839735,6.857752,5.626609,7.921481
+original,misses,0,,,,
+remove_token,hits,245760,6.369894,6.498461,2.058057,7.833707
+remove_token,misses,0,,,,
+add_token,hits,245760,5.680149,5.772238,1.623462,8.188748
+add_token,misses,0,,,,
+add_char,hits,245760,4.587374,4.967186,-2.65728,7.927787
+add_char,misses,0,,,,
+synonym,hits,245760,5.611645,5.687544,2.008536,7.813636
+synonym,misses,0,,,,

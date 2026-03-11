@@ -1,0 +1,6 @@
+metric,value
+total_builds,32767
+avg_build_time_s,4.725372
+median_build_time_s,4.553507
+min_build_time_s,0.512326
+max_build_time_s,13.756013

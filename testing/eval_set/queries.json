@@ -1,0 +1,62 @@
+[
+  {
+    "git_link": "https://github.com/rahulsingh0327/calculator.git",
+    "query": "evaluate a mathematical arithmetic expression securely"
+  },
+  {
+    "git_link": "https://github.com/rahulsingh0327/unit_converter.git",
+    "query": "convert between different units of measurement like length and temperature"
+  },
+  {
+    "git_link": "https://github.com/rahulsingh0327/notes.git",
+    "query": "create read update and delete notes with title and body"
+  },
+  {
+    "git_link": "https://github.com/rahulsingh0327/system_monitor.git",
+    "query": "monitor CPU memory and disk usage and list top processes"
+  },
+  {
+    "git_link": "https://github.com/rahulsingh0327/weather_tool.git",
+    "query": "get current weather conditions temperature and humidity for a city"
+  },
+  {
+    "git_link": "https://github.com/rahulsingh0327/currency_tool.git",
+    "query": "convert an amount between two currency codes using live exchange rates"
+  },
+  {
+    "git_link": "https://github.com/rahulsingh0327/text_tool.git",
+    "query": "perform NLP tasks like word count summarization and keyword extraction on text"
+  },
+  {
+    "git_link": "https://github.com/rahulsingh0327/random_tool.git",
+    "query": "generate random UUIDs cryptographic tokens or random integers"
+  },
+  {
+    "git_link": "https://github.com/rahulsingh0327/docker_tool.git",
+    "query": "list running docker containers and fetch container logs"
+  },
+  {
+    "git_link": "https://github.com/rahulsingh0327/git_tool.git",
+    "query": "get git repository status and view commit log history"
+  },
+  {
+    "git_link": "https://github.com/rahulsingh0327/network_tool.git",
+    "query": "ping a host to check connectivity or perform a DNS lookup"
+  },
+  {
+    "git_link": "https://github.com/rahulsingh0327/hash_tool.git",
+    "query": "calculate cryptographic hash of a file or encode decode base64 text"
+  },
+  {
+    "git_link": "https://github.com/rahulsingh0327/image_meta_tool.git",
+    "query": "read metadata format dimensions and EXIF data from a local image file"
+  },
+  {
+    "git_link": "https://github.com/rahulsingh0327/csv_excel_tool.git",
+    "query": "preview rows or get summary statistics from a CSV or Excel file"
+  },
+  {
+    "git_link": "https://github.com/rahulsingh0327/pdf_tool.git",
+    "query": "extract text content or retrieve page count metadata from a PDF file"
+  }
+]

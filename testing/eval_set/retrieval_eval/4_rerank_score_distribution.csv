@@ -1,0 +1,3 @@
+category,count,avg_score,median_score,min_score,max_score
+correct_retrievals,245760,6.839735,6.857752,5.626609,7.921481
+wrong_retrievals,0,,,,

@@ -1,0 +1,47 @@
+=====================================
+ MCP BUILD + AST EVALUATION REPORT
+=====================================
+Workers                  : 12
+Batch size               : 32
+Cache dir                : C:\Users\ASUS\Desktop\empt\ToolStore\.repo_cache
+
+--- BUILD ACCURACY ---
+Total subsets            : 32767
+Build success            : 32767
+Build fail               : 0
+Build accuracy           : 100.0%
+
+--- AST ACCURACY (of successful builds) ---
+AST valid                : 32767
+AST invalid              : 0
+AST accuracy             : 100.0%
+
+--- END-TO-END ACCURACY ---
+End-to-end accuracy      : 100.0%
+
+--- BUILD TIMING ---
+Avg build time           : 4.725372s
+Median build time        : 4.553507s
+Min build time           : 0.512326s
+Max build time           : 13.756013s
+
+--- ERROR TYPE COUNTS ---
+  PotentialUndefinedName         : 114687
+
+--- BREAKDOWN BY SUBSET SIZE ---
+ size    b_ok     tot   b_acc%   ast_ok   a_acc%   avg_tools   avg_time_s
+    1      15      15    100.0       15    100.0         1.0     0.690289
+    2     105     105    100.0      105    100.0         2.0     1.369258
+    3     455     455    100.0      455    100.0         3.0      2.01123
+    4    1365    1365    100.0     1365    100.0         4.0     2.378133
+    5    3003    3003    100.0     3003    100.0         5.0     2.818666
+    6    5005    5005    100.0     5005    100.0         6.0     3.465793
+    7    6435    6435    100.0     6435    100.0         7.0     4.095295
+    8    6435    6435    100.0     6435    100.0         8.0     5.340547
+    9    5005    5005    100.0     5005    100.0         9.0     6.244681
+   10    3003    3003    100.0     3003    100.0        10.0     6.386017
+   11    1365    1365    100.0     1365    100.0        11.0     6.995966
+   12     455     455    100.0      455    100.0        12.0     7.293905
+   13     105     105    100.0      105    100.0        13.0     5.936903
+   14      15      15    100.0       15    100.0        14.0     4.297629
+   15       1       1    100.0        1    100.0        15.0     2.607326

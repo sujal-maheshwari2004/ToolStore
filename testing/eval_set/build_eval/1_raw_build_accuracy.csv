@@ -1,0 +1,9 @@
+metric,value
+total_subsets,32767
+build_success,32767
+build_fail,0
+build_accuracy_pct,100.0
+ast_valid,32767
+ast_invalid,0
+ast_accuracy_pct,100.0
+end_to_end_accuracy_pct,100.0

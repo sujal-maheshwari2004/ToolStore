@@ -1,0 +1,5 @@
+metric,value
+total_queries,245760
+correct_retrievals,245760
+wrong_retrievals,0
+raw_accuracy_pct,100.0

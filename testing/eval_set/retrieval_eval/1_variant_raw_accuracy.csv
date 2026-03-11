@@ -1,0 +1,6 @@
+variant,total_queries,correct,wrong,raw_accuracy_pct,total_subsets,fully_correct_subsets,subset_accuracy_pct,avg_score_hits,avg_score_misses
+original,245760,245760,0,100.0,32767,32767,100.0,6.839735,
+remove_token,245760,245760,0,100.0,32767,32767,100.0,6.369894,
+add_token,245760,245760,0,100.0,32767,32767,100.0,5.680149,
+add_char,245760,245760,0,100.0,32767,32767,100.0,4.587374,
+synonym,245760,245760,0,100.0,32767,32767,100.0,5.611645,

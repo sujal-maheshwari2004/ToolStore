@@ -1,0 +1,5 @@
+variant,description,original_q_acc_pct,variant_q_acc_pct,q_acc_delta,original_s_acc_pct,variant_s_acc_pct,s_acc_delta
+remove_token,One random token removed per query,100.0,100.0,0.0,100.0,100.0,0.0
+add_token,One random filler token inserted per query,100.0,100.0,0.0,100.0,100.0,0.0
+add_char,One random character inserted into a token,100.0,100.0,0.0,100.0,100.0,0.0
+synonym,Noun/object token replaced with synonym,100.0,100.0,0.0,100.0,100.0,0.0
