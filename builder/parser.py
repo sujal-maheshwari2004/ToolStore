@@ -1,7 +1,7 @@
 import os
 import ast
 from pathlib import Path
-from typing import Dict, List, Set
+from typing import Dict, List, Set, Optional
 
 
 class ToolParser:
@@ -12,10 +12,22 @@ class ToolParser:
         - Utility blocks
         - @tool-decorated functions
         - Conflict information
+
+    Only directories listed in `allowed_dirs` are parsed.
+    If `allowed_dirs` is None, all subdirectories of tools_dir are parsed.
     """
 
-    def __init__(self, tools_dir: Path):
-        self.tools_dir = Path(tools_dir)
+    def __init__(
+        self,
+        tools_dir: Path,
+        allowed_dirs: Optional[List[Path]] = None,
+    ):
+        self.tools_dir    = Path(tools_dir)
+        self.allowed_dirs = (
+            [Path(d) for d in allowed_dirs]
+            if allowed_dirs is not None
+            else None
+        )
 
     # ==================================================
     # PUBLIC ENTRYPOINT
@@ -23,20 +35,11 @@ class ToolParser:
 
     def parse_all(self) -> Dict:
 
-        structured_imports = {
-            "import": [],
-            "from": []
-        }
-
-        utilities: List[str] = []
-        tools: List[Dict] = []
-
+        structured_imports = {"import": [], "from": []}
+        utilities:  List[str]  = []
+        tools:      List[Dict] = []
         seen_tool_names: Set[str] = set()
-
-        conflicts = {
-            "duplicate_tools": [],
-            "relative_imports": []
-        }
+        conflicts = {"duplicate_tools": [], "relative_imports": []}
 
         for file_path in self._get_py_files():
             code = self._read_code(file_path)
@@ -52,23 +55,20 @@ class ToolParser:
                     for alias in node.names:
                         structured_imports["import"].append({
                             "module": alias.name,
-                            "alias": alias.asname
+                            "alias":  alias.asname,
                         })
 
                 elif isinstance(node, ast.ImportFrom):
-
-                    # Detect relative import
                     if node.level and node.level > 0:
                         conflicts["relative_imports"].append(
                             ast.get_source_segment(code, node)
                         )
                         continue
-
                     for alias in node.names:
                         structured_imports["from"].append({
                             "module": node.module,
-                            "name": alias.name,
-                            "alias": alias.asname
+                            "name":   alias.name,
+                            "alias":  alias.asname,
                         })
 
                 # --------------------------
@@ -76,20 +76,16 @@ class ToolParser:
                 # --------------------------
 
                 elif isinstance(node, ast.FunctionDef):
-
                     if self._is_tool_function(node):
-
                         if node.name in seen_tool_names:
                             conflicts["duplicate_tools"].append(node.name)
                         else:
                             seen_tool_names.add(node.name)
-
                         tools.append({
-                            "name": node.name,
+                            "name":   node.name,
                             "source": self._extract_function_with_decorators(node, code),
-                            "file": str(file_path)
+                            "file":   str(file_path),
                         })
-
                     else:
                         block = ast.get_source_segment(code, node)
                         if block:
@@ -114,10 +110,10 @@ class ToolParser:
                         utilities.append(src)
 
         return {
-            "imports": structured_imports,
+            "imports":   structured_imports,
             "utilities": utilities,
-            "tools": tools,
-            "conflicts": conflicts
+            "tools":     tools,
+            "conflicts": conflicts,
         }
 
     # ==================================================
@@ -125,11 +121,25 @@ class ToolParser:
     # ==================================================
 
     def _get_py_files(self) -> List[Path]:
+        """
+        Yield .py files from allowed_dirs only.
+        Falls back to full tools_dir walk if allowed_dirs is None.
+        """
+        search_roots: List[Path] = (
+            self.allowed_dirs
+            if self.allowed_dirs is not None
+            else [
+                d for d in self.tools_dir.iterdir()
+                if d.is_dir()
+            ]
+        )
+
         py_files = []
-        for root, _, files in os.walk(self.tools_dir):
-            for file in files:
-                if file.endswith(".py"):
-                    py_files.append(Path(root) / file)
+        for root_dir in search_roots:
+            for root, _, files in os.walk(root_dir):
+                for fname in files:
+                    if fname.endswith(".py"):
+                        py_files.append(Path(root) / fname)
         return py_files
 
     def _read_code(self, file_path: Path) -> str:
@@ -142,23 +152,15 @@ class ToolParser:
 
     def _is_tool_function(self, node: ast.FunctionDef) -> bool:
         for decorator in node.decorator_list:
-
-            # @tool
             if isinstance(decorator, ast.Name) and decorator.id == "tool":
                 return True
-
-            # @mcp.tool
             if isinstance(decorator, ast.Attribute) and decorator.attr == "tool":
                 return True
-
-            # @tool(...)
             if isinstance(decorator, ast.Call):
                 if isinstance(decorator.func, ast.Name) and decorator.func.id == "tool":
                     return True
-
                 if isinstance(decorator.func, ast.Attribute) and decorator.func.attr == "tool":
                     return True
-
         return False
 
     # ==================================================
@@ -166,18 +168,15 @@ class ToolParser:
     # ==================================================
 
     def _extract_function_with_decorators(self, node: ast.FunctionDef, code: str) -> str:
-
-        lines = code.split("\n")
+        lines      = code.split("\n")
         start_line = node.lineno - 1
-
         decorators = []
-        idx = start_line - 1
+        idx        = start_line - 1
 
         while idx >= 0 and lines[idx].strip().startswith("@"):
             decorators.append(lines[idx])
             idx -= 1
 
         decorators.reverse()
-
         func_block = decorators + lines[start_line:node.end_lineno]
         return "\n".join(func_block)
