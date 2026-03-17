@@ -14,15 +14,5 @@ dependencies = [
 [project.scripts]
 toolstorepy = "toolstorepy.cli:main"
 
-[tool.uv.workspace]
-members = [
-    ".",
-]
-
-[tool.uv.sources]
-toolstorepy = { workspace = true }
-
-[dependency-groups]
-dev = [
-    "toolstorepy",
-]
+[tool.setuptools.packages.find]
+include = ["toolstorepy*"]
