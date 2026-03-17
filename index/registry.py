@@ -6,8 +6,8 @@ from typing import Optional
 # ------------------------------------------------------------------
 
 BUILTIN_INDEXES = {
-    # Example placeholders — replace with real URLs
-    "core-tools": "https://github.com/sujal-maheshwari2004/ToolStore/blob/main/releases/downlaod/v0.1.0/core-tools-v1.zip",
+    # Active once the v0.1.0 GitHub Release is published with core-tools-v1.zip attached
+    "core-tools": "https://github.com/sujal-maheshwari2004/ToolStore/releases/download/v0.1.0/core-tools-v1.zip",
 }
 
 
