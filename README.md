@@ -303,6 +303,30 @@ toolstorepy/
 
 ---
 
+## 📦 Installation
+
+### Requirements
+
+- Python ≥ 3.12
+- Git installed and on `PATH`
+- Internet access (for index download + repo cloning)
+
+### Install
+
+```bash
+pip install .
+```
+
+Or in editable mode:
+
+```bash
+pip install -e .
+```
+
+### Note on `mcp[cli]`
+
+ToolStorePy deliberately does **not** install `mcp[cli]` into your system Python environment. Instead, it creates an isolated virtual environment at `toolstorepy_workspace/.venv` and installs `mcp[cli]` there automatically during the first build. This keeps the MCP runtime sandboxed alongside the generated server and avoids version conflicts with anything else in your environment. You do not need to install `mcp` manually — the build step handles it.
+
 ## 📜 License
 
 MIT — Copyright (c) 2025 Sujal Maheshwari. See [LICENSE](LICENSE) for full terms.
