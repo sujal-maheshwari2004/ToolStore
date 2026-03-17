@@ -1,9 +1,9 @@
 [project]
 name = "toolstorepy"
 version = "0.1.0"
-description = "Add your description here"
+description = "Automatic MCP server builder — describe tools in plain English, get a ready-to-run server."
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.12"
 dependencies = [
     "chromadb>=1.5.0",
     "requests>=2.32.5",
@@ -26,4 +26,3 @@ toolstorepy = { workspace = true }
 dev = [
     "toolstorepy",
 ]
-
