@@ -1,0 +1,1625 @@
+Directory structure:
+└── ToolStore/
+    ├── README.md
+    ├── __init__.py
+    ├── cli.py
+    ├── config.py
+    ├── LICENSE
+    ├── orchestrator.py
+    ├── pyproject.toml
+    ├── requirements.txt
+    ├── .python-version
+    ├── builder/
+    │   ├── __init__.py
+    │   ├── mcp_builder.py
+    │   └── parser.py
+    ├── index/
+    │   ├── __init__.py
+    │   ├── downloader.py
+    │   └── registry.py
+    ├── loader/
+    │   ├── __init__.py
+    │   ├── cache.py
+    │   └── repo.py
+    ├── releases/
+    │   └── downlaod/
+    │       └── v0.1.0/
+    │           └── core-tools-v1.zip
+    ├── search/
+    │   ├── __init__.py
+    │   ├── rerank.py
+    │   └── semantic.py
+    └── utils/
+        ├── env_merger.py
+        └── security_scanner.py
+
+================================================
+FILE: README.md
+================================================
+Error reading file with 'cp1252': 'charmap' codec can't decode byte 0x8f in position 1887: character maps to <undefined>
+
+
+================================================
+FILE: __init__.py
+================================================
+__version__ = "0.1.0"
+
+
+
+================================================
+FILE: cli.py
+================================================
+import argparse
+import sys
+import json
+from pathlib import Path
+
+from .orchestrator import ToolStorePy
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="toolstorepy",
+        description="ToolStorePy - Automatic MCP Tool Builder"
+    )
+
+    subparsers = parser.add_subparsers(dest="command")
+
+    # --------------------------------------------------
+    # BUILD COMMAND
+    # --------------------------------------------------
+
+    build_parser = subparsers.add_parser(
+        "build",
+        help="Build unified MCP server from tool index and queries"
+    )
+
+    build_parser.add_argument(
+        "--queries",
+        required=True,
+        help="Path to queries.json file"
+    )
+
+    build_parser.add_argument(
+        "--index",
+        help="Name of built-in tool index"
+    )
+
+    build_parser.add_argument(
+        "--index-url",
+        help="Direct URL to downloadable vector index archive"
+    )
+
+    build_parser.add_argument(
+        "--workspace",
+        default="toolstorepy_workspace",
+        help="Workspace directory (default: toolstorepy_workspace)"
+    )
+
+    build_parser.add_argument(
+        "--install-requirements",
+        action="store_true",
+        help="Install requirements.txt from cloned repositories"
+    )
+
+    build_parser.add_argument(
+        "--force-refresh",
+        action="store_true",
+        help="Force re-download of index archive"
+    )
+
+    build_parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Enable verbose logging"
+    )
+
+    # --------------------------------------------------
+    # CACHE COMMAND
+    # --------------------------------------------------
+
+    cache_parser = subparsers.add_parser(
+        "cache",
+        help="Manage local repo cache"
+    )
+    cache_subparsers = cache_parser.add_subparsers(dest="cache_command")
+
+    pop_parser = cache_subparsers.add_parser(
+        "populate",
+        help="Cache repos from a queries.json"
+    )
+    pop_parser.add_argument(
+        "--queries",
+        required=True,
+        help="Path to queries.json"
+    )
+    pop_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-cache existing repos"
+    )
+
+    cache_subparsers.add_parser("list",  help="List all cached repos")
+    cache_subparsers.add_parser("clear", help="Clear all cached repos")
+
+    # --------------------------------------------------
+    # PARSE
+    # --------------------------------------------------
+
+    args = parser.parse_args()
+
+    # --------------------------------------------------
+    # HANDLE BUILD
+    # --------------------------------------------------
+
+    if args.command == "build":
+
+        if not args.index and not args.index_url:
+            print("Error: You must provide either --index or --index-url.")
+            sys.exit(1)
+
+        if args.index and args.index_url:
+            print("Error: Provide either --index or --index-url, not both.")
+            sys.exit(1)
+
+        try:
+            toolstore = ToolStorePy(
+                workspace=args.workspace,
+                install_requirements=args.install_requirements,
+                verbose=args.verbose,
+            )
+
+            output_path = toolstore.build(
+                queries=args.queries,
+                index=args.index,
+                index_url=args.index_url,
+                force_refresh=args.force_refresh,
+            )
+
+            print(f"\nMCP server generated at: {output_path}")
+
+        except Exception as e:
+            print(f"\nBuild failed: {e}")
+            sys.exit(1)
+
+    # --------------------------------------------------
+    # HANDLE CACHE
+    # --------------------------------------------------
+
+    elif args.command == "cache":
+        from .loader.cache import RepoCache
+
+        repo_cache = RepoCache()
+
+        if args.cache_command == "populate":
+            with open(args.queries) as f:
+                data = json.load(f)
+            urls = list({item["git_link"] for item in data})
+            print(f"Caching {len(urls)} repos...")
+            repo_cache.populate_many(urls, force=args.force)
+            print("Done.")
+
+        elif args.cache_command == "list":
+            cached = repo_cache.list_cached()
+            print(f"Cached repos ({len(cached)}):")
+            for name in sorted(cached):
+                print(f"  {name}")
+
+        elif args.cache_command == "clear":
+            confirm = input("Clear all cached repos? [y/N]: ")
+            if confirm.lower() == "y":
+                repo_cache.clear()
+                print("Cache cleared.")
+
+        else:
+            cache_parser.print_help()
+
+    else:
+        parser.print_help()
+
+
+================================================
+FILE: config.py
+================================================
+import os
+import logging
+
+def configure_external_logging(verbose: bool = False):
+    """
+    Suppress noisy external libraries (HuggingFace, urllib3, Chroma, etc.)
+    """
+
+    # Disable telemetry
+    os.environ["ANONYMIZED_TELEMETRY"] = "False"
+    os.environ["CHROMA_TELEMETRY"] = "False"
+    os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+    os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+    level = logging.DEBUG if verbose else logging.ERROR
+
+    logging.getLogger("transformers").setLevel(level)
+    logging.getLogger("sentence_transformers").setLevel(level)
+    logging.getLogger("huggingface_hub").setLevel(level)
+    logging.getLogger("httpx").setLevel(level)
+    logging.getLogger("urllib3").setLevel(level)
+    logging.getLogger("chromadb").setLevel(level)
+
+    try:
+        from transformers import logging as hf_logging
+        hf_logging.set_verbosity_error()
+    except Exception:
+        pass
+
+
+
+================================================
+FILE: LICENSE
+================================================
+MIT License
+
+Copyright (c) 2025 Sujal Maheshwari
+ToolStorePy â€” Automatic MCP Server Builder
+https://github.com/sujal-maheshwari2004/toolstorepy
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+This project was created by Sujal Maheshwari as part of a final year major
+project. If you use, fork, or build upon ToolStorePy, attribution to the
+original author and project is required under the terms above and appreciated
+in any public-facing derivative work.
+
+
+
+================================================
+FILE: orchestrator.py
+================================================
+Error reading file with 'cp1252': 'charmap' codec can't decode byte 0x90 in position 9358: character maps to <undefined>
+
+
+================================================
+FILE: pyproject.toml
+================================================
+[project]
+name = "toolstorepy"
+version = "0.1.0"
+description = "Automatic MCP server builder â€” describe tools in plain English, get a ready-to-run server."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "chromadb>=1.5.0",
+    "requests>=2.32.5",
+    "sentence-transformers>=5.2.2",
+    "transformers>=5.1.0",
+]
+
+[project.scripts]
+toolstorepy = "toolstorepy.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["toolstorepy*"]
+
+
+================================================
+FILE: requirements.txt
+================================================
+chromadb>=1.5.0
+requests>=2.32.5
+sentence-transformers>=5.2.2
+
+
+================================================
+FILE: .python-version
+================================================
+3.13
+
+
+
+================================================
+FILE: builder/__init__.py
+================================================
+[Empty file]
+
+
+================================================
+FILE: builder/mcp_builder.py
+================================================
+Error reading file with 'cp1252': 'charmap' codec can't decode byte 0x8f in position 5186: character maps to <undefined>
+
+
+================================================
+FILE: builder/parser.py
+================================================
+import os
+import ast
+import logging
+from pathlib import Path
+from typing import Dict, List, Set, Optional, Tuple
+
+logger = logging.getLogger("ToolStorePy")
+
+# Directories that are never meant to contribute tool code.
+_EXCLUDED_DIRS = {
+    "test", "tests", "testing",
+    "examples", "example",
+    "docs", "doc",
+    "scripts",
+    "bench", "benchmarks",
+    ".git", "__pycache__",
+    ".venv", "venv", "env",
+    "build", "dist", ".eggs",
+}
+
+# Top-level files that should never be parsed.
+_EXCLUDED_FILES = {
+    "setup.py", "setup.cfg",
+    "conftest.py",
+}
+
+
+class ToolParser:
+    """
+    Parses Python files inside tool repositories and extracts:
+
+        - Structured imports (deduplicated, with alias collision handling)
+        - Utility blocks (helper functions + global assignments, renamed on collision)
+        - @tool-decorated functions (renamed on collision)
+        - Conflict / warning information
+
+    Only directories listed in `allowed_dirs` are parsed.
+    If `allowed_dirs` is None, all subdirectories of tools_dir are parsed.
+
+    Edge cases handled
+    ------------------
+    Import issues
+        - Relative imports: dropped but every tool function whose *source text*
+          references them is flagged so the caller can warn at build time.
+        - Duplicate plain imports (``import os`` twice): collapsed to one.
+        - Alias conflicts (``import os`` vs ``import os as operating_system``):
+          the first alias seen wins; second is recorded in conflicts.
+        - Star imports (``from module import *``): kept verbatim but recorded
+          separately so the caller can warn.
+
+    Name collisions
+        - Duplicate @tool names: second+ occurrences are renamed
+          ``<name>__<repo>`` and a conflict entry is added.
+        - Helper function collisions: same rename strategy applied to utilities.
+        - Global assignment collisions: same rename strategy (variable is
+          prefixed with the repo name).
+
+    File / repo structure issues
+        - Test, docs, examples, scripts directories are excluded.
+        - setup.py and conftest.py are excluded.
+        - if __name__ == '__main__' blocks are skipped cleanly.
+        - Repos that contribute zero @tool functions are warned about.
+    """
+
+    def __init__(
+        self,
+        tools_dir: Path,
+        allowed_dirs: Optional[List[Path]] = None,
+    ):
+        self.tools_dir    = Path(tools_dir)
+        self.allowed_dirs = (
+            [Path(d) for d in allowed_dirs]
+            if allowed_dirs is not None
+            else None
+        )
+
+    # ==================================================
+    # PUBLIC ENTRYPOINT
+    # ==================================================
+
+    def parse_all(self) -> Dict:
+        """
+        Returns
+        -------
+        {
+            "imports":   {"import": [...], "from": [...]},
+            "utilities": [source_str, ...],
+            "tools":     [{"name": str, "source": str, "file": str}, ...],
+            "conflicts": {
+                "duplicate_tools":    [(original_name, new_name, file), ...],
+                "duplicate_helpers":  [(original_name, new_name, file), ...],
+                "duplicate_globals":  [(original_name, new_name, file), ...],
+                "relative_imports":   [import_source_str, ...],
+                "star_imports":       [import_source_str, ...],
+                "alias_conflicts":    [(module, kept_alias, dropped_alias, file), ...],
+                "empty_repos":        [repo_name, ...],
+                "tools_with_missing_helpers": [(tool_name, missing_symbol, file), ...],
+            },
+        }
+        """
+        structured_imports: Dict = {"import": [], "from": []}
+        utilities:  List[str]  = []
+        tools:      List[Dict] = []
+
+        # Deduplication state
+        seen_tool_names:    Dict[str, str] = {}   # name -> first file
+        seen_helper_names:  Dict[str, str] = {}   # name -> first file
+        seen_global_names:  Dict[str, str] = {}   # name -> first file
+        seen_plain_imports: Dict[str, Optional[str]] = {}  # module -> alias
+        seen_from_imports:  Set[Tuple] = set()    # (module, name, alias)
+
+        conflicts: Dict = {
+            "duplicate_tools":              [],
+            "duplicate_helpers":            [],
+            "duplicate_globals":            [],
+            "relative_imports":             [],
+            "star_imports":                 [],
+            "alias_conflicts":              [],
+            "empty_repos":                  [],
+            "tools_with_missing_helpers":   [],
+        }
+
+        # Track which symbols each repo exports via relative imports so we can
+        # warn when a tool references one of them after stripping.
+        relative_symbols_by_file: Dict[str, Set[str]] = {}
+
+        for file_path in self._get_py_files():
+            repo_name = file_path.relative_to(self.tools_dir).parts[0]
+            code = self._read_code(file_path)
+
+            try:
+                tree = ast.parse(code)
+            except SyntaxError as exc:
+                logger.warning(
+                    f"[PARSER] Skipping unparseable file {file_path}: {exc}"
+                )
+                continue
+
+            rel_symbols_this_file: Set[str] = set()
+
+            for node in tree.body:
+
+                # ------------------------------------------------
+                # Skip __main__ guards entirely
+                # ------------------------------------------------
+                if self._is_main_guard(node):
+                    continue
+
+                # ------------------------------------------------
+                # IMPORTS
+                # ------------------------------------------------
+
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        mod   = alias.name
+                        alias_name = alias.asname
+
+                        if mod in seen_plain_imports:
+                            existing_alias = seen_plain_imports[mod]
+                            if existing_alias != alias_name:
+                                # Alias conflict â€” keep first, record second
+                                conflicts["alias_conflicts"].append(
+                                    (mod, existing_alias, alias_name, str(file_path))
+                                )
+                            # Either way â€” skip, already recorded
+                            continue
+
+                        seen_plain_imports[mod] = alias_name
+                        structured_imports["import"].append({
+                            "module": mod,
+                            "alias":  alias_name,
+                        })
+
+                elif isinstance(node, ast.ImportFrom):
+                    # Relative import â€” drop but record
+                    if node.level and node.level > 0:
+                        src = ast.get_source_segment(code, node) or ""
+                        conflicts["relative_imports"].append(src)
+                        # Track what names this relative import would have provided
+                        for alias in node.names:
+                            rel_symbols_this_file.add(alias.asname or alias.name)
+                        continue
+
+                    mod = node.module or ""
+
+                    for alias in node.names:
+                        name       = alias.name
+                        alias_name = alias.asname
+
+                        # Star import
+                        if name == "*":
+                            src = ast.get_source_segment(code, node) or ""
+                            conflicts["star_imports"].append(src)
+                            # Keep it â€” we can't know what it provides
+                            key = (mod, "*", None)
+                            if key not in seen_from_imports:
+                                seen_from_imports.add(key)
+                                structured_imports["from"].append({
+                                    "module": mod,
+                                    "name":   "*",
+                                    "alias":  None,
+                                })
+                            continue
+
+                        key = (mod, name, alias_name)
+                        if key in seen_from_imports:
+                            continue
+                        seen_from_imports.add(key)
+                        structured_imports["from"].append({
+                            "module": mod,
+                            "name":   name,
+                            "alias":  alias_name,
+                        })
+
+                # ------------------------------------------------
+                # TOOL FUNCTIONS
+                # ------------------------------------------------
+
+                elif isinstance(node, ast.FunctionDef):
+                    if self._is_tool_function(node):
+                        original_name = node.name
+                        final_name    = original_name
+
+                        if original_name in seen_tool_names:
+                            # Rename: original__reponame
+                            final_name = f"{original_name}__{repo_name}"
+                            conflicts["duplicate_tools"].append(
+                                (original_name, final_name, str(file_path))
+                            )
+                            logger.warning(
+                                f"[PARSER] Duplicate @tool '{original_name}' in "
+                                f"{file_path} â€” renamed to '{final_name}'"
+                            )
+                        else:
+                            seen_tool_names[original_name] = str(file_path)
+
+                        source = self._extract_function_with_decorators(node, code)
+                        if original_name != final_name:
+                            source = self._rename_function(source, original_name, final_name)
+
+                        tools.append({
+                            "name":   final_name,
+                            "source": source,
+                            "file":   str(file_path),
+                        })
+
+                    # Non-tool helper function
+                    else:
+                        original_name = node.name
+                        final_name    = original_name
+
+                        if original_name in seen_helper_names:
+                            final_name = f"{original_name}__{repo_name}"
+                            conflicts["duplicate_helpers"].append(
+                                (original_name, final_name, str(file_path))
+                            )
+                            logger.warning(
+                                f"[PARSER] Duplicate helper '{original_name}' in "
+                                f"{file_path} â€” renamed to '{final_name}'"
+                            )
+                        else:
+                            seen_helper_names[original_name] = str(file_path)
+
+                        block = ast.get_source_segment(code, node)
+                        if block:
+                            if original_name != final_name:
+                                block = self._rename_function(block, original_name, final_name)
+                            utilities.append(block)
+
+                # ------------------------------------------------
+                # CLASSES
+                # ------------------------------------------------
+
+                elif isinstance(node, ast.ClassDef):
+                    block = ast.get_source_segment(code, node)
+                    if block:
+                        utilities.append(block)
+
+                # ------------------------------------------------
+                # GLOBAL ASSIGNMENTS
+                # ------------------------------------------------
+
+                elif isinstance(node, ast.Assign):
+                    src = ast.get_source_segment(code, node) or ""
+                    if "FastMCP" in src:
+                        continue
+
+                    # Try to detect simple name assignments for collision checking
+                    assigned_names = self._extract_assigned_names(node)
+
+                    renamed = False
+                    for var_name in assigned_names:
+                        if var_name in seen_global_names:
+                            new_name = f"{var_name}__{repo_name}"
+                            conflicts["duplicate_globals"].append(
+                                (var_name, new_name, str(file_path))
+                            )
+                            logger.warning(
+                                f"[PARSER] Duplicate global '{var_name}' in "
+                                f"{file_path} â€” renamed to '{new_name}'"
+                            )
+                            src = src.replace(var_name, new_name, 1)
+                            renamed = True
+                        else:
+                            seen_global_names[var_name] = str(file_path)
+
+                    utilities.append(src)
+
+            # Record relative symbols for this file
+            if rel_symbols_this_file:
+                relative_symbols_by_file[str(file_path)] = rel_symbols_this_file
+
+        # ------------------------------------------------
+        # Post-pass: warn about tools referencing dropped relative symbols
+        # ------------------------------------------------
+        all_relative_symbols = set().union(*relative_symbols_by_file.values()) if relative_symbols_by_file else set()
+        if all_relative_symbols:
+            for tool in tools:
+                for sym in all_relative_symbols:
+                    if sym in tool["source"]:
+                        conflicts["tools_with_missing_helpers"].append(
+                            (tool["name"], sym, tool["file"])
+                        )
+
+        # ------------------------------------------------
+        # Warn about repos with no tools
+        # ------------------------------------------------
+        repos_with_tools: Set[str] = set()
+        for tool in tools:
+            repo = Path(tool["file"]).relative_to(self.tools_dir).parts[0]
+            repos_with_tools.add(repo)
+
+        search_roots = self._get_search_roots()
+        for root_dir in search_roots:
+            if root_dir.name not in repos_with_tools:
+                conflicts["empty_repos"].append(root_dir.name)
+                logger.warning(
+                    f"[PARSER] Repo '{root_dir.name}' contributed zero @tool functions."
+                )
+
+        return {
+            "imports":   structured_imports,
+            "utilities": utilities,
+            "tools":     tools,
+            "conflicts": conflicts,
+        }
+
+    # ==================================================
+    # FILE DISCOVERY
+    # ==================================================
+
+    def _get_search_roots(self) -> List[Path]:
+        if self.allowed_dirs is not None:
+            return [Path(d) for d in self.allowed_dirs]
+        return [d for d in self.tools_dir.iterdir() if d.is_dir()]
+
+    def _get_py_files(self) -> List[Path]:
+        """
+        Yield .py files from allowed_dirs only, excluding:
+          - known non-code directories (tests, docs, examples, â€¦)
+          - known non-tool top-level files (setup.py, conftest.py)
+        """
+        py_files = []
+        for root_dir in self._get_search_roots():
+            for root, dirs, files in os.walk(root_dir):
+                root_path = Path(root)
+
+                # Prune excluded directories in-place so os.walk won't descend
+                dirs[:] = [
+                    d for d in dirs
+                    if d.lower() not in _EXCLUDED_DIRS
+                ]
+
+                for fname in files:
+                    if not fname.endswith(".py"):
+                        continue
+
+                    # Exclude known non-tool files only at the repo root level
+                    if root_path == root_dir and fname in _EXCLUDED_FILES:
+                        logger.debug(f"[PARSER] Skipping excluded file: {root_path / fname}")
+                        continue
+
+                    py_files.append(root_path / fname)
+
+        return py_files
+
+    def _read_code(self, file_path: Path) -> str:
+        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+            return f.read()
+
+    # ==================================================
+    # NODE CLASSIFICATION
+    # ==================================================
+
+    def _is_main_guard(self, node: ast.stmt) -> bool:
+        """Return True for `if __name__ == '__main__':` blocks."""
+        if not isinstance(node, ast.If):
+            return False
+        test = node.test
+        if not isinstance(test, ast.Compare):
+            return False
+        if not isinstance(test.left, ast.Name) or test.left.id != "__name__":
+            return False
+        if len(test.ops) != 1 or not isinstance(test.ops[0], ast.Eq):
+            return False
+        if len(test.comparators) != 1:
+            return False
+        comp = test.comparators[0]
+        return isinstance(comp, ast.Constant) and comp.value == "__main__"
+
+    def _is_tool_function(self, node: ast.FunctionDef) -> bool:
+        for decorator in node.decorator_list:
+            if isinstance(decorator, ast.Name) and decorator.id == "tool":
+                return True
+            if isinstance(decorator, ast.Attribute) and decorator.attr == "tool":
+                return True
+            if isinstance(decorator, ast.Call):
+                if isinstance(decorator.func, ast.Name) and decorator.func.id == "tool":
+                    return True
+                if isinstance(decorator.func, ast.Attribute) and decorator.func.attr == "tool":
+                    return True
+        return False
+
+    # ==================================================
+    # SOURCE EXTRACTION & REWRITING
+    # ==================================================
+
+    def _extract_function_with_decorators(self, node: ast.FunctionDef, code: str) -> str:
+        lines      = code.split("\n")
+        start_line = node.lineno - 1
+        decorators = []
+        idx        = start_line - 1
+
+        while idx >= 0 and lines[idx].strip().startswith("@"):
+            decorators.append(lines[idx])
+            idx -= 1
+
+        decorators.reverse()
+        func_block = decorators + lines[start_line:node.end_lineno]
+        return "\n".join(func_block)
+
+    def _rename_function(self, source: str, old_name: str, new_name: str) -> str:
+        """
+        Replace the function definition name only (not arbitrary occurrences of
+        the string).  Handles both `def foo(` and `async def foo(`.
+        """
+        import re
+        # Match `def <old_name>(` with word boundary to avoid partial matches
+        pattern = rf'\bdef\s+{re.escape(old_name)}\s*\('
+        replacement = f"def {new_name}("
+        return re.sub(pattern, replacement, source, count=1)
+
+    def _extract_assigned_names(self, node: ast.Assign) -> List[str]:
+        """
+        Return simple variable names from an assignment's targets.
+        Only handles Name targets (not tuple unpacking, attribute sets, etc.)
+        """
+        names = []
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                names.append(target.id)
+        return names
+
+
+
+================================================
+FILE: index/__init__.py
+================================================
+[Empty file]
+
+
+================================================
+FILE: index/downloader.py
+================================================
+import shutil
+import zipfile
+import tarfile
+import hashlib
+import requests
+from pathlib import Path
+
+
+class IndexDownloader:
+    """
+    Handles downloading and extracting vector DB archives.
+    """
+
+    def __init__(self, index_root: Path):
+        """
+        index_root: Path to workspace/index_db
+        """
+        self.index_root = Path(index_root)
+        self.archives_dir = self.index_root / "archives"
+
+        self.index_root.mkdir(parents=True, exist_ok=True)
+        self.archives_dir.mkdir(parents=True, exist_ok=True)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def download(self, url: str, force_refresh: bool = False) -> Path:
+        """
+        Downloads and prepares an index from URL.
+
+        Returns:
+            Path to extracted DB directory.
+        """
+
+        archive_path = self._download_archive(url, force_refresh)
+        extract_path = self._extract_archive(archive_path, force_refresh)
+
+        return extract_path
+
+    # ------------------------------------------------------------------
+    # Internal Methods
+    # ------------------------------------------------------------------
+
+    def _download_archive(self, url: str, force_refresh: bool) -> Path:
+        """
+        Download archive into archives directory.
+        """
+
+        filename = self._derive_filename(url)
+        archive_path = self.archives_dir / filename
+
+        if archive_path.exists() and not force_refresh:
+            return archive_path
+
+        response = requests.get(url, stream=True)
+        response.raise_for_status()
+
+        with open(archive_path, "wb") as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+
+        return archive_path
+
+    def _extract_archive(self, archive_path: Path, force_refresh: bool) -> Path:
+        """
+        Extract archive into isolated folder.
+        """
+
+        folder_name = archive_path.stem
+        extract_path = self.index_root / folder_name
+
+        if extract_path.exists():
+            if force_refresh:
+                shutil.rmtree(extract_path)
+            else:
+                return extract_path
+
+        extract_path.mkdir(parents=True, exist_ok=True)
+
+        if archive_path.suffix == ".zip":
+            with zipfile.ZipFile(archive_path, "r") as z:
+                z.extractall(extract_path)
+
+        elif archive_path.suffixes[-2:] == [".tar", ".gz"]:
+            with tarfile.open(archive_path, "r:gz") as t:
+                t.extractall(extract_path)
+
+        else:
+            raise ValueError(
+                f"Unsupported archive format: {archive_path.name}"
+            )
+
+        return extract_path
+
+    def _derive_filename(self, url: str) -> str:
+        """
+        Safely derive filename from URL.
+        If URL does not contain a clean filename,
+        fallback to hashed name.
+        """
+
+        name = url.split("/")[-1]
+
+        if "." not in name:
+            # Fallback: use hash
+            hash_id = hashlib.sha256(url.encode()).hexdigest()[:12]
+            return f"index-{hash_id}.zip"
+
+        return name
+
+
+
+================================================
+FILE: index/registry.py
+================================================
+from typing import Optional
+
+
+# ------------------------------------------------------------------
+# Built-in Index Registry
+# ------------------------------------------------------------------
+
+BUILTIN_INDEXES = {
+    # Active once the v0.1.0 GitHub Release is published with core-tools-v1.zip attached
+    "core-tools": "https://github.com/sujal-maheshwari2004/ToolStore/releases/download/v0.1.0/core-tools-v1.zip",
+}
+
+
+# ------------------------------------------------------------------
+# Resolver
+# ------------------------------------------------------------------
+
+def resolve_index(
+    index: Optional[str] = None,
+    index_url: Optional[str] = None,
+) -> str:
+    """
+    Resolve either a built-in index name or a direct index URL.
+
+    Rules:
+        - Exactly one of `index` or `index_url` must be provided.
+        - If `index` is provided, it must exist in BUILTIN_INDEXES.
+        - Returns a download URL string.
+    """
+
+    if index and index_url:
+        raise ValueError(
+            "Provide either 'index' or 'index_url', not both."
+        )
+
+    if not index and not index_url:
+        raise ValueError(
+            "Either 'index' or 'index_url' must be provided."
+        )
+
+    if index:
+        if index not in BUILTIN_INDEXES:
+            available = ", ".join(BUILTIN_INDEXES.keys())
+            raise ValueError(
+                f"Unknown index '{index}'. "
+                f"Available indexes: {available}"
+            )
+        return BUILTIN_INDEXES[index]
+
+    return index_url
+
+
+
+================================================
+FILE: loader/__init__.py
+================================================
+[Empty file]
+
+
+================================================
+FILE: loader/cache.py
+================================================
+import subprocess
+import logging
+from pathlib import Path
+from typing import Optional
+
+logger = logging.getLogger("ToolStorePy")
+
+# Default cache location â€” inside the package
+DEFAULT_CACHE_DIR = Path(__file__).parent.parent / ".repo_cache"
+
+
+class RepoCache:
+    """
+    Manages a local cache of bare git repositories inside the package.
+    
+    Workflow:
+        - populate(url)  : clone from remote into cache as bare repo (once)
+        - get_path(url)  : return local bare repo path for a given remote URL
+        - clone_from_cache(url, target) : fast local clone from cache â†’ target dir
+    """
+
+    def __init__(self, cache_dir: Optional[Path] = None):
+        self.cache_dir = Path(cache_dir or DEFAULT_CACHE_DIR)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+    # --------------------------------------------------
+    # PUBLIC API
+    # --------------------------------------------------
+
+    def populate(self, remote_url: str, force: bool = False):
+        """
+        Clone remote_url as a bare repo into cache.
+        Skips if already cached unless force=True.
+        """
+        bare_path = self._bare_path(remote_url)
+
+        if bare_path.exists() and not force:
+            logger.debug(f"[CACHE] Already cached: {bare_path.name}")
+            return
+
+        if bare_path.exists() and force:
+            import shutil
+            shutil.rmtree(bare_path)
+
+        logger.info(f"[CACHE] Caching {remote_url} â†’ {bare_path.name}")
+
+        subprocess.run(
+            ["git", "clone", "--bare", "--depth", "1", remote_url, str(bare_path)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        logger.info(f"[CACHE] Cached {bare_path.name}")
+
+    def populate_many(self, remote_urls: list, force: bool = False):
+        """Cache multiple repos, skipping already-cached ones."""
+        for url in remote_urls:
+            try:
+                self.populate(url, force=force)
+            except subprocess.CalledProcessError as e:
+                logger.error(f"[CACHE] Failed to cache {url}: {e.stderr}")
+
+    def is_cached(self, remote_url: str) -> bool:
+        return self._bare_path(remote_url).exists()
+
+    def get_path(self, remote_url: str) -> Optional[Path]:
+        p = self._bare_path(remote_url)
+        return p if p.exists() else None
+
+    def clone_local(self, remote_url: str, target: Path) -> bool:
+        """
+        Clone from local bare cache into target directory.
+        Falls back to remote if not cached.
+        Returns True if cloned from cache, False if fell back to remote.
+        """
+        bare_path = self._bare_path(remote_url)
+
+        if bare_path.exists():
+            subprocess.run(
+                ["git", "clone", str(bare_path), str(target)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            return True
+
+        # fallback to remote
+        logger.warning(f"[CACHE] Not cached, falling back to remote: {remote_url}")
+        subprocess.run(
+            ["git", "clone", "--depth", "1", remote_url, str(target)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return False
+
+    def list_cached(self) -> list:
+        return [p.name for p in self.cache_dir.iterdir() if p.is_dir()]
+
+    def clear(self):
+        import shutil
+        shutil.rmtree(self.cache_dir)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        logger.info("[CACHE] Cache cleared.")
+
+    # --------------------------------------------------
+    # INTERNAL
+    # --------------------------------------------------
+
+    def _bare_path(self, remote_url: str) -> Path:
+        """Derive stable folder name from URL."""
+        name = remote_url.rstrip("/").split("/")[-1]
+        if name.endswith(".git"):
+            name = name[:-4]
+        return self.cache_dir / f"{name}.git"
+
+
+================================================
+FILE: loader/repo.py
+================================================
+import subprocess
+import logging
+from pathlib import Path
+from typing import Iterable, Optional
+
+
+class RepoLoader:
+    """
+    Handles cloning tool repositories into workspace.
+    Uses local RepoCache when available for instant clones.
+    """
+
+    def __init__(
+        self,
+        tools_dir: Path,
+        install: bool = False,
+        python_exec: Optional[Path] = None,
+        cache=None,   # RepoCache instance, optional
+    ):
+        self.tools_dir  = Path(tools_dir)
+        self.install    = install
+        self.python_exec = python_exec
+        self.cache      = cache
+        self.tools_dir.mkdir(parents=True, exist_ok=True)
+        self.logger = logging.getLogger("ToolStorePy")
+
+    def process(self, repo_urls: Iterable[str]):
+        for repo_url in repo_urls:
+            self._clone_repo(repo_url)
+
+    def _clone_repo(self, repo_url: str):
+        folder_name = self._derive_folder_name(repo_url)
+        target_path = self.tools_dir / folder_name
+
+        if target_path.exists():
+            self.logger.info(f"[SKIP] Already exists: {folder_name}")
+            return
+
+        self.logger.info(f"[CLONE] {folder_name}")
+
+        try:
+            if self.cache and self.cache.is_cached(repo_url):
+                # instant local clone from cache
+                self.cache.clone_local(repo_url, target_path)
+                self.logger.info(f"[CACHE HIT] {folder_name}")
+            else:
+                # remote clone
+                subprocess.run(
+                    ["git", "clone", "--depth", "1", repo_url, str(target_path)],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                self.logger.info(f"[REMOTE] Cloned {folder_name}")
+
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"[FAILED] {folder_name}: {e.stderr.strip()}")
+            raise RuntimeError(f"Git clone failed for {repo_url}")
+
+        if self.install and self.python_exec:
+            self._install_requirements(target_path)
+
+    def _derive_folder_name(self, repo_url: str) -> str:
+        name = repo_url.rstrip("/").split("/")[-1]
+        if name.endswith(".git"):
+            name = name[:-4]
+        return name
+
+    def _install_requirements(self, repo_path: Path):
+        requirements_file = repo_path / "requirements.txt"
+        if not requirements_file.exists():
+            return
+        self.logger.info(f"[DEPS] Installing {repo_path.name}")
+        try:
+            subprocess.run(
+                [str(self.python_exec), "-m", "pip", "install",
+                 "-r", str(requirements_file), "--quiet",
+                 "--disable-pip-version-check", "--no-warn-script-location"],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except subprocess.CalledProcessError:
+            self.logger.warning(f"[DEPS-SKIPPED] {repo_path.name}")
+
+
+================================================
+FILE: releases/downlaod/v0.1.0/core-tools-v1.zip
+================================================
+[Binary file]
+
+
+================================================
+FILE: search/__init__.py
+================================================
+[Empty file]
+
+
+================================================
+FILE: search/rerank.py
+================================================
+from sentence_transformers import CrossEncoder
+
+class Reranker:
+    def __init__(self, model_name: str):
+        self.model = CrossEncoder(model_name)
+
+    def rank(self, query: str, documents: list[str]):
+        if not documents:
+            return None, None
+
+        pairs = [[query, doc] for doc in documents]
+        scores = self.model.predict(pairs)
+
+        best_index = int(scores.argmax())
+        return documents[best_index], float(scores[best_index])
+
+
+
+================================================
+FILE: search/semantic.py
+================================================
+from sentence_transformers import SentenceTransformer
+from chromadb import PersistentClient
+from .rerank import Reranker
+
+
+class SemanticSearcher:
+    def __init__(self, persist_dir, encoder_model, cross_encoder_model, top_k=10):
+        self.encoder = SentenceTransformer(encoder_model)
+        self.client = PersistentClient(path=str(persist_dir))
+        self.collection = self.client.get_or_create_collection("tools")
+        self.reranker = Reranker(cross_encoder_model)
+        self.top_k = top_k
+
+    def batch_search(self, queries):
+        return [self.search(q) for q in queries]
+
+    def search(self, query):
+        # 1️⃣ Embed
+        embedding = self.encoder.encode([query])[0]
+
+        # 2️⃣ Retrieve top-k
+        results = self.collection.query(
+            query_embeddings=[embedding.tolist()],
+            n_results=self.top_k,
+            include=["documents"],
+        )
+
+        docs = results["documents"][0] if results["documents"] else []
+
+        # 3️⃣ Rerank
+        best_doc, best_score = self.reranker.rank(query, docs)
+
+        if not best_doc:
+            return {
+                "query": query,
+                "tool_id": None,
+                "tool_name": None,
+                "tool_description": None,
+                "tool_git_link": None,
+                "score": None,
+            }
+
+        # 4️⃣ Parse structured fields
+        parsed = self._parse_chunk(best_doc)
+
+        return {
+            "query": query,
+            **parsed,
+            "score": best_score,
+        }
+
+    def _parse_chunk(self, chunk_text):
+        result = {
+            "tool_id": None,
+            "tool_name": None,
+            "tool_description": None,
+            "tool_git_link": None,
+        }
+
+        for line in chunk_text.split("\n"):
+            if line.startswith("ID:"):
+                result["tool_id"] = line.replace("ID:", "").strip()
+            elif line.startswith("Name:"):
+                result["tool_name"] = line.replace("Name:", "").strip()
+            elif line.startswith("Description:"):
+                result["tool_description"] = line.replace("Description:", "").strip()
+            elif line.startswith("Git Link:"):
+                result["tool_git_link"] = line.replace("Git Link:", "").strip()
+
+        return result
+
+
+
+================================================
+FILE: utils/env_merger.py
+================================================
+import os
+import logging
+from pathlib import Path
+from typing import Optional
+
+logger = logging.getLogger("ToolStorePy")
+
+
+# -------------------------------------------------------
+# PARSING
+# -------------------------------------------------------
+
+def _parse_env_example(path: Path) -> list[dict]:
+    """
+    Parse a .env.example file into a list of entries.
+    Each entry is one of:
+        {"type": "blank"}
+        {"type": "comment",  "line": "# some comment"}
+        {"type": "key",      "key": "FOO", "value": "bar", "inline_comment": "# optional"}
+    """
+    entries = []
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        for raw in f:
+            line = raw.rstrip("\n")
+
+            if line.strip() == "":
+                entries.append({"type": "blank"})
+                continue
+
+            if line.strip().startswith("#"):
+                entries.append({"type": "comment", "line": line})
+                continue
+
+            # KEY=value  # optional inline comment
+            if "=" in line:
+                key_part, _, rest = line.partition("=")
+                key = key_part.strip()
+                inline_comment = ""
+                if " #" in rest:
+                    val_part, _, inline_comment = rest.partition(" #")
+                    value = val_part.strip()
+                    inline_comment = "# " + inline_comment.strip()
+                else:
+                    value = rest.strip()
+                entries.append({
+                    "type":           "key",
+                    "key":            key,
+                    "value":          value,
+                    "inline_comment": inline_comment,
+                })
+                continue
+
+            # Unrecognised line â€” treat as comment
+            entries.append({"type": "comment", "line": line})
+
+    return entries
+
+
+# -------------------------------------------------------
+# SCANNING
+# -------------------------------------------------------
+
+def scan_env_examples(tools_dir: Path) -> dict[str, list[dict]]:
+    """
+    Walk tools_dir and return {repo_name: parsed_entries} for every
+    .env.example found directly inside a repo root.
+    """
+    found = {}
+    for repo_dir in sorted(tools_dir.iterdir()):
+        if not repo_dir.is_dir():
+            continue
+        env_example = repo_dir / ".env.example"
+        if env_example.exists():
+            found[repo_dir.name] = _parse_env_example(env_example)
+            logger.debug(f"[ENV] Found .env.example in {repo_dir.name}")
+    return found
+
+
+# -------------------------------------------------------
+# INTERACTIVE CONFLICT RESOLUTION
+# -------------------------------------------------------
+
+def _resolve_conflict(key: str, candidates: list[dict]) -> dict:
+    """
+    Ask the user to choose between conflicting definitions of `key`.
+    `candidates` is a list of {"repo", "value", "inline_comment"} dicts.
+    Returns the chosen candidate (or a custom one).
+    """
+    print(f"\n{'='*60}")
+    print(f"  Conflict: key '{key}' is defined in multiple repos")
+    print(f"{'='*60}")
+    for i, c in enumerate(candidates, 1):
+        comment_str = f"  {c['inline_comment']}" if c["inline_comment"] else ""
+        print(f"  [{i}] repo: {c['repo']}")
+        print(f"       {key}={c['value']}{comment_str}")
+    print(f"  [{len(candidates)+1}] Enter a custom value")
+    print()
+
+    while True:
+        try:
+            raw = input(f"  Choose [1-{len(candidates)+1}]: ").strip()
+            choice = int(raw)
+        except (ValueError, EOFError):
+            print("  Please enter a number.")
+            continue
+
+        if 1 <= choice <= len(candidates):
+            return candidates[choice - 1]
+
+        if choice == len(candidates) + 1:
+            custom_val = input(f"  Enter value for {key}: ").strip()
+            custom_comment = input(f"  Enter inline comment (leave blank for none): ").strip()
+            return {
+                "repo":           "custom",
+                "value":          custom_val,
+                "inline_comment": f"# {custom_comment}" if custom_comment else "",
+            }
+
+        print(f"  Invalid choice. Enter a number between 1 and {len(candidates)+1}.")
+
+
+# -------------------------------------------------------
+# MERGING
+# -------------------------------------------------------
+
+def merge_env_examples(
+    repo_entries: dict[str, list[dict]],
+) -> tuple[list[dict], list[str]]:
+    """
+    Merge parsed entries from multiple repos into a single ordered list.
+
+    Strategy:
+    - Non-key lines (blanks, comments) are kept per-repo under a repo header.
+    - Key entries are deduplicated; conflicts trigger an interactive prompt.
+
+    Returns:
+        merged  : list of output lines (strings)
+        all_keys: ordered list of all key names included
+    """
+    # First pass: collect all definitions per key across repos
+    key_candidates: dict[str, list[dict]] = {}  # key -> [{repo, value, inline_comment, context_comments}]
+    repo_structure: dict[str, list] = {}         # repo -> ordered entries with resolved keys
+
+    for repo, entries in repo_entries.items():
+        pending_comments: list[str] = []
+        repo_structure[repo] = []
+
+        for entry in entries:
+            if entry["type"] == "blank":
+                pending_comments.append("")
+            elif entry["type"] == "comment":
+                pending_comments.append(entry["line"])
+            elif entry["type"] == "key":
+                key = entry["key"]
+                candidate = {
+                    "repo":             repo,
+                    "value":            entry["value"],
+                    "inline_comment":   entry["inline_comment"],
+                    "context_comments": list(pending_comments),
+                }
+                key_candidates.setdefault(key, []).append(candidate)
+                repo_structure[repo].append({
+                    "type":    "key_ref",
+                    "key":     key,
+                    "context": list(pending_comments),
+                })
+                pending_comments = []
+
+    # Second pass: resolve conflicts
+    resolved: dict[str, dict] = {}   # key -> chosen candidate
+    for key, candidates in key_candidates.items():
+        if len(candidates) == 1:
+            resolved[key] = candidates[0]
+        else:
+            resolved[key] = _resolve_conflict(key, candidates)
+
+    # Third pass: build merged output lines
+    merged_lines: list[str] = []
+    all_keys: list[str] = []
+    seen_keys: set[str] = set()
+
+    for repo, structure in repo_structure.items():
+        # Repo header
+        merged_lines.append("")
+        merged_lines.append(f"# {'â”€'*54}")
+        merged_lines.append(f"# Repo: {repo}")
+        merged_lines.append(f"# {'â”€'*54}")
+
+        for item in structure:
+            key = item["key"]
+            if key in seen_keys:
+                merged_lines.append(f"# (duplicate '{key}' from {repo} â€” skipped)")
+                continue
+
+            seen_keys.add(key)
+            all_keys.append(key)
+
+            # Context comments/blanks
+            for c in item["context"]:
+                merged_lines.append(c)
+
+            r = resolved[key]
+            # Attribution comment
+            if r["repo"] != repo:
+                merged_lines.append(f"# ^ value chosen from repo: {r['repo']}")
+
+            ic = f"  {r['inline_comment']}" if r["inline_comment"] else ""
+            merged_lines.append(f"{key}={r['value']}{ic}")
+
+    return merged_lines, all_keys
+
+
+# -------------------------------------------------------
+# .env VALIDATION
+# -------------------------------------------------------
+
+def _load_env_keys(env_path: Path) -> set[str]:
+    """Return set of keys defined (non-empty) in an existing .env file."""
+    keys = set()
+    with open(env_path, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" in line:
+                key, _, val = line.partition("=")
+                if val.strip():
+                    keys.add(key.strip())
+    return keys
+
+
+def validate_env(
+    workspace: Path,
+    required_keys: list[str],
+) -> list[str]:
+    """
+    If workspace/.env exists, return list of required_keys that are
+    missing or empty in it.  Returns [] if no .env present (no complaint).
+    """
+    env_path = workspace / ".env"
+    if not env_path.exists():
+        return []
+
+    existing = _load_env_keys(env_path)
+    return [k for k in required_keys if k not in existing]
+
+
+# -------------------------------------------------------
+# TOP-LEVEL ENTRY POINT
+# -------------------------------------------------------
+
+def process_env_examples(
+    tools_dir: Path,
+    workspace: Path,
+) -> tuple[list[str], list[str]]:
+    """
+    Full pipeline:
+      1. Scan repos for .env.example files
+      2. Merge (with interactive conflict resolution)
+      3. Write workspace/.env.example
+      4. Validate against workspace/.env if it exists
+
+    Returns:
+        all_keys     : list of env var names found across all repos
+        missing_keys : keys absent/empty in workspace/.env ([] if no .env)
+    """
+    repo_entries = scan_env_examples(tools_dir)
+
+    if not repo_entries:
+        return [], []
+
+    repos_with_env = list(repo_entries.keys())
+    logger.info(
+        f"[ENV] Found .env.example in {len(repos_with_env)} repo(s): "
+        + ", ".join(repos_with_env)
+    )
+
+    merged_lines, all_keys = merge_env_examples(repo_entries)
+
+    # Write merged .env.example
+    out_path = workspace / ".env.example"
+    header = [
+        "# ToolStorePy â€” merged .env.example",
+        "# Generated from .env.example files found in cloned tool repos.",
+        "# Copy this file to .env and fill in the required values.",
+        "#",
+        f"# Repos contributing secrets: {', '.join(repos_with_env)}",
+        "#",
+    ]
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(header + merged_lines) + "\n")
+
+    logger.info(f"[ENV] Merged .env.example written â†’ {out_path}")
+
+    missing_keys = validate_env(workspace, all_keys)
+
+    return all_keys, missing_keys
+
+
+================================================
+FILE: utils/security_scanner.py
+================================================
+Error reading file with 'cp1252': 'charmap' codec can't decode byte 0x90 in position 14026: character maps to <undefined>
+

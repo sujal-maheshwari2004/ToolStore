@@ -1,5 +1,8 @@
 import os
+import io
+import re
 import ast
+import tokenize
 import logging
 from pathlib import Path
 from typing import Dict, List, Set, Optional, Tuple
@@ -30,36 +33,15 @@ class ToolParser:
     Parses Python files inside tool repositories and extracts:
 
         - Structured imports (deduplicated, with alias collision handling)
-        - Utility blocks (helper functions + global assignments, renamed on collision)
-        - @tool-decorated functions (renamed on collision)
+        - Utility blocks (helpers, classes, globals, and other top-level code)
+        - @tool-decorated functions (sync and async)
         - Conflict / warning information
+
+    Renames on collision are applied with an identifier-aware rewrite, so
+    references to a renamed symbol within the same file are also updated.
 
     Only directories listed in `allowed_dirs` are parsed.
     If `allowed_dirs` is None, all subdirectories of tools_dir are parsed.
-
-    Edge cases handled
-    ------------------
-    Import issues
-        - Relative imports: dropped but every tool function whose *source text*
-          references them is flagged so the caller can warn at build time.
-        - Duplicate plain imports (``import os`` twice): collapsed to one.
-        - Alias conflicts (``import os`` vs ``import os as operating_system``):
-          the first alias seen wins; second is recorded in conflicts.
-        - Star imports (``from module import *``): kept verbatim but recorded
-          separately so the caller can warn.
-
-    Name collisions
-        - Duplicate @tool names: second+ occurrences are renamed
-          ``<name>__<repo>`` and a conflict entry is added.
-        - Helper function collisions: same rename strategy applied to utilities.
-        - Global assignment collisions: same rename strategy (variable is
-          prefixed with the repo name).
-
-    File / repo structure issues
-        - Test, docs, examples, scripts directories are excluded.
-        - setup.py and conftest.py are excluded.
-        - if __name__ == '__main__' blocks are skipped cleanly.
-        - Repos that contribute zero @tool functions are warned about.
     """
 
     def __init__(
@@ -67,7 +49,7 @@ class ToolParser:
         tools_dir: Path,
         allowed_dirs: Optional[List[Path]] = None,
     ):
-        self.tools_dir    = Path(tools_dir)
+        self.tools_dir = Path(tools_dir)
         self.allowed_dirs = (
             [Path(d) for d in allowed_dirs]
             if allowed_dirs is not None
@@ -79,54 +61,43 @@ class ToolParser:
     # ==================================================
 
     def parse_all(self) -> Dict:
-        """
-        Returns
-        -------
-        {
-            "imports":   {"import": [...], "from": [...]},
-            "utilities": [source_str, ...],
-            "tools":     [{"name": str, "source": str, "file": str}, ...],
-            "conflicts": {
-                "duplicate_tools":    [(original_name, new_name, file), ...],
-                "duplicate_helpers":  [(original_name, new_name, file), ...],
-                "duplicate_globals":  [(original_name, new_name, file), ...],
-                "relative_imports":   [import_source_str, ...],
-                "star_imports":       [import_source_str, ...],
-                "alias_conflicts":    [(module, kept_alias, dropped_alias, file), ...],
-                "empty_repos":        [repo_name, ...],
-                "tools_with_missing_helpers": [(tool_name, missing_symbol, file), ...],
-            },
-        }
-        """
         structured_imports: Dict = {"import": [], "from": []}
-        utilities:  List[str]  = []
-        tools:      List[Dict] = []
+        utilities: List[str] = []
+        tools: List[Dict] = []
 
-        # Deduplication state
-        seen_tool_names:    Dict[str, str] = {}   # name -> first file
-        seen_helper_names:  Dict[str, str] = {}   # name -> first file
-        seen_global_names:  Dict[str, str] = {}   # name -> first file
-        seen_plain_imports: Dict[str, Optional[str]] = {}  # module -> alias
-        seen_from_imports:  Set[Tuple] = set()    # (module, name, alias)
+        # Cross-file first-occurrence registries (decide which file gets to
+        # keep the original name; later files have their copy renamed).
+        seen_tool_names:   Dict[str, str] = {}
+        seen_helper_names: Dict[str, str] = {}
+        seen_global_names: Dict[str, str] = {}
+        seen_class_names:  Dict[str, str] = {}
+        seen_plain_imports: Dict[str, Optional[str]] = {}
+        seen_from_imports: Set[Tuple] = set()
 
         conflicts: Dict = {
             "duplicate_tools":              [],
             "duplicate_helpers":            [],
             "duplicate_globals":            [],
+            "duplicate_classes":            [],
             "relative_imports":             [],
             "star_imports":                 [],
             "alias_conflicts":              [],
             "empty_repos":                  [],
             "tools_with_missing_helpers":   [],
+            "tool_methods_skipped":         [],
+            "unparseable_files":            [],
+            "decoding_replacements":        [],
         }
 
-        # Track which symbols each repo exports via relative imports so we can
-        # warn when a tool references one of them after stripping.
-        relative_symbols_by_file: Dict[str, Set[str]] = {}
-
+        # ------------------------------------------------------------------
+        # Read + parse every file once, keep records for two-pass processing.
+        # ------------------------------------------------------------------
+        file_records: List[Dict] = []
         for file_path in self._get_py_files():
             repo_name = file_path.relative_to(self.tools_dir).parts[0]
-            code = self._read_code(file_path)
+            code, had_replacement = self._read_code(file_path)
+            if had_replacement:
+                conflicts["decoding_replacements"].append(str(file_path))
 
             try:
                 tree = ast.parse(code)
@@ -134,37 +105,134 @@ class ToolParser:
                 logger.warning(
                     f"[PARSER] Skipping unparseable file {file_path}: {exc}"
                 )
+                conflicts["unparseable_files"].append((str(file_path), str(exc)))
                 continue
 
-            rel_symbols_this_file: Set[str] = set()
+            file_records.append({
+                "path":             file_path,
+                "repo":             repo_name,
+                "code":             code,
+                "tree":             tree,
+                "rename_map":       {},     # original_name -> new_name (this file's scope)
+                "relative_symbols": set(),
+            })
+
+        # ------------------------------------------------------------------
+        # PASS 1 - detect duplicates and build per-file rename maps.
+        # ------------------------------------------------------------------
+        for record in file_records:
+            file_path = record["path"]
+            repo_name = record["repo"]
+            tree      = record["tree"]
+            rename_map = record["rename_map"]
 
             for node in tree.body:
-
-                # ------------------------------------------------
-                # Skip __main__ guards entirely
-                # ------------------------------------------------
                 if self._is_main_guard(node):
                     continue
 
-                # ------------------------------------------------
-                # IMPORTS
-                # ------------------------------------------------
+                # Functions (sync or async)
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    name = node.name
+                    if self._is_tool_function(node):
+                        if name in seen_tool_names:
+                            new_name = f"{name}__{repo_name}"
+                            rename_map[name] = new_name
+                            conflicts["duplicate_tools"].append(
+                                (name, new_name, str(file_path))
+                            )
+                            logger.warning(
+                                f"[PARSER] Duplicate @tool '{name}' in "
+                                f"{file_path} -- renamed to '{new_name}'"
+                            )
+                        else:
+                            seen_tool_names[name] = str(file_path)
+                    else:
+                        if name in seen_helper_names:
+                            new_name = f"{name}__{repo_name}"
+                            rename_map[name] = new_name
+                            conflicts["duplicate_helpers"].append(
+                                (name, new_name, str(file_path))
+                            )
+                            logger.warning(
+                                f"[PARSER] Duplicate helper '{name}' in "
+                                f"{file_path} -- renamed to '{new_name}'"
+                            )
+                        else:
+                            seen_helper_names[name] = str(file_path)
 
+                # Classes
+                elif isinstance(node, ast.ClassDef):
+                    name = node.name
+                    if name in seen_class_names:
+                        new_name = f"{name}__{repo_name}"
+                        rename_map[name] = new_name
+                        conflicts["duplicate_classes"].append(
+                            (name, new_name, str(file_path))
+                        )
+                        logger.warning(
+                            f"[PARSER] Duplicate class '{name}' in "
+                            f"{file_path} -- renamed to '{new_name}'"
+                        )
+                    else:
+                        seen_class_names[name] = str(file_path)
+
+                    # Warn about @tool methods inside the class body -- they
+                    # are not extracted as standalone tools.
+                    for child in node.body:
+                        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+                                and self._is_tool_function(child):
+                            conflicts["tool_methods_skipped"].append(
+                                (node.name, child.name, str(file_path))
+                            )
+                            logger.warning(
+                                f"[PARSER] @tool method '{child.name}' in class "
+                                f"'{node.name}' ({file_path}) was not extracted "
+                                f"as a standalone tool."
+                            )
+
+                # Globals (Assign + AnnAssign)
+                elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+                    if self._is_fastmcp_assignment(node):
+                        continue
+                    for var_name in self._extract_assigned_names(node):
+                        if var_name in seen_global_names:
+                            new_name = f"{var_name}__{repo_name}"
+                            rename_map[var_name] = new_name
+                            conflicts["duplicate_globals"].append(
+                                (var_name, new_name, str(file_path))
+                            )
+                            logger.warning(
+                                f"[PARSER] Duplicate global '{var_name}' in "
+                                f"{file_path} -- renamed to '{new_name}'"
+                            )
+                        else:
+                            seen_global_names[var_name] = str(file_path)
+
+        # ------------------------------------------------------------------
+        # PASS 2 - extract blocks, apply per-file rename maps to references.
+        # ------------------------------------------------------------------
+        for record in file_records:
+            file_path  = record["path"]
+            code       = record["code"]
+            tree       = record["tree"]
+            rename_map = record["rename_map"]
+
+            for node in tree.body:
+                if self._is_main_guard(node):
+                    continue
+
+                # ---- IMPORTS ----------------------------------------------
                 if isinstance(node, ast.Import):
                     for alias in node.names:
-                        mod   = alias.name
+                        mod = alias.name
                         alias_name = alias.asname
-
                         if mod in seen_plain_imports:
                             existing_alias = seen_plain_imports[mod]
                             if existing_alias != alias_name:
-                                # Alias conflict — keep first, record second
                                 conflicts["alias_conflicts"].append(
                                     (mod, existing_alias, alias_name, str(file_path))
                                 )
-                            # Either way — skip, already recorded
                             continue
-
                         seen_plain_imports[mod] = alias_name
                         structured_imports["import"].append({
                             "module": mod,
@@ -172,26 +240,23 @@ class ToolParser:
                         })
 
                 elif isinstance(node, ast.ImportFrom):
-                    # Relative import — drop but record
+                    # Relative import -- drop but record
                     if node.level and node.level > 0:
                         src = ast.get_source_segment(code, node) or ""
                         conflicts["relative_imports"].append(src)
-                        # Track what names this relative import would have provided
                         for alias in node.names:
-                            rel_symbols_this_file.add(alias.asname or alias.name)
+                            record["relative_symbols"].add(
+                                alias.asname or alias.name
+                            )
                         continue
 
                     mod = node.module or ""
-
                     for alias in node.names:
-                        name       = alias.name
+                        name = alias.name
                         alias_name = alias.asname
-
-                        # Star import
                         if name == "*":
                             src = ast.get_source_segment(code, node) or ""
                             conflicts["star_imports"].append(src)
-                            # Keep it — we can't know what it provides
                             key = (mod, "*", None)
                             if key not in seen_from_imports:
                                 seen_from_imports.add(key)
@@ -212,126 +277,74 @@ class ToolParser:
                             "alias":  alias_name,
                         })
 
-                # ------------------------------------------------
-                # TOOL FUNCTIONS
-                # ------------------------------------------------
+                # ---- FUNCTIONS (sync + async) ----------------------------
+                elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    source    = self._extract_function_with_decorators(node, code)
+                    rewritten = self._apply_rename_map(source, rename_map)
 
-                elif isinstance(node, ast.FunctionDef):
                     if self._is_tool_function(node):
-                        original_name = node.name
-                        final_name    = original_name
-
-                        if original_name in seen_tool_names:
-                            # Rename: original__reponame
-                            final_name = f"{original_name}__{repo_name}"
-                            conflicts["duplicate_tools"].append(
-                                (original_name, final_name, str(file_path))
-                            )
-                            logger.warning(
-                                f"[PARSER] Duplicate @tool '{original_name}' in "
-                                f"{file_path} — renamed to '{final_name}'"
-                            )
-                        else:
-                            seen_tool_names[original_name] = str(file_path)
-
-                        source = self._extract_function_with_decorators(node, code)
-                        if original_name != final_name:
-                            source = self._rename_function(source, original_name, final_name)
-
+                        final_name = rename_map.get(node.name, node.name)
                         tools.append({
                             "name":   final_name,
-                            "source": source,
+                            "source": rewritten,
                             "file":   str(file_path),
                         })
-
-                    # Non-tool helper function
                     else:
-                        original_name = node.name
-                        final_name    = original_name
+                        utilities.append(rewritten)
 
-                        if original_name in seen_helper_names:
-                            final_name = f"{original_name}__{repo_name}"
-                            conflicts["duplicate_helpers"].append(
-                                (original_name, final_name, str(file_path))
-                            )
-                            logger.warning(
-                                f"[PARSER] Duplicate helper '{original_name}' in "
-                                f"{file_path} — renamed to '{final_name}'"
-                            )
-                        else:
-                            seen_helper_names[original_name] = str(file_path)
-
-                        block = ast.get_source_segment(code, node)
-                        if block:
-                            if original_name != final_name:
-                                block = self._rename_function(block, original_name, final_name)
-                            utilities.append(block)
-
-                # ------------------------------------------------
-                # CLASSES
-                # ------------------------------------------------
-
+                # ---- CLASSES ---------------------------------------------
                 elif isinstance(node, ast.ClassDef):
-                    block = ast.get_source_segment(code, node)
-                    if block:
-                        utilities.append(block)
+                    source = self._extract_class_with_decorators(node, code)
+                    if source:
+                        utilities.append(self._apply_rename_map(source, rename_map))
 
-                # ------------------------------------------------
-                # GLOBAL ASSIGNMENTS
-                # ------------------------------------------------
-
-                elif isinstance(node, ast.Assign):
-                    src = ast.get_source_segment(code, node) or ""
-                    if "FastMCP" in src:
+                # ---- GLOBAL ASSIGNMENTS ----------------------------------
+                elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+                    if self._is_fastmcp_assignment(node):
                         continue
+                    src = ast.get_source_segment(code, node) or ""
+                    if src:
+                        utilities.append(self._apply_rename_map(src, rename_map))
 
-                    # Try to detect simple name assignments for collision checking
-                    assigned_names = self._extract_assigned_names(node)
+                # ---- OTHER MODULE-LEVEL CODE (preserve) ------------------
+                elif isinstance(node, (
+                    ast.Try, ast.With, ast.AsyncWith,
+                    ast.For, ast.AsyncFor, ast.While, ast.If,
+                    ast.Expr, ast.Raise, ast.Delete,
+                    ast.Global, ast.Nonlocal,
+                )):
+                    src = ast.get_source_segment(code, node)
+                    if src:
+                        utilities.append(self._apply_rename_map(src, rename_map))
 
-                    renamed = False
-                    for var_name in assigned_names:
-                        if var_name in seen_global_names:
-                            new_name = f"{var_name}__{repo_name}"
-                            conflicts["duplicate_globals"].append(
-                                (var_name, new_name, str(file_path))
-                            )
-                            logger.warning(
-                                f"[PARSER] Duplicate global '{var_name}' in "
-                                f"{file_path} — renamed to '{new_name}'"
-                            )
-                            src = src.replace(var_name, new_name, 1)
-                            renamed = True
-                        else:
-                            seen_global_names[var_name] = str(file_path)
-
-                    utilities.append(src)
-
-            # Record relative symbols for this file
-            if rel_symbols_this_file:
-                relative_symbols_by_file[str(file_path)] = rel_symbols_this_file
-
-        # ------------------------------------------------
-        # Post-pass: warn about tools referencing dropped relative symbols
-        # ------------------------------------------------
-        all_relative_symbols = set().union(*relative_symbols_by_file.values()) if relative_symbols_by_file else set()
-        if all_relative_symbols:
+        # ------------------------------------------------------------------
+        # Post-pass: per-file, identifier-aware check for tools referencing
+        # symbols that came in via dropped relative imports.
+        # ------------------------------------------------------------------
+        for record in file_records:
+            rel_symbols = record["relative_symbols"]
+            if not rel_symbols:
+                continue
+            file_str = str(record["path"])
             for tool in tools:
-                for sym in all_relative_symbols:
-                    if sym in tool["source"]:
+                if tool["file"] != file_str:
+                    continue
+                tool_idents = self._extract_identifiers(tool["source"])
+                for sym in rel_symbols:
+                    if sym in tool_idents:
                         conflicts["tools_with_missing_helpers"].append(
                             (tool["name"], sym, tool["file"])
                         )
 
-        # ------------------------------------------------
-        # Warn about repos with no tools
-        # ------------------------------------------------
+        # ------------------------------------------------------------------
+        # Warn about repos with no tools.
+        # ------------------------------------------------------------------
         repos_with_tools: Set[str] = set()
         for tool in tools:
             repo = Path(tool["file"]).relative_to(self.tools_dir).parts[0]
             repos_with_tools.add(repo)
 
-        search_roots = self._get_search_roots()
-        for root_dir in search_roots:
+        for root_dir in self._get_search_roots():
             if root_dir.name not in repos_with_tools:
                 conflicts["empty_repos"].append(root_dir.name)
                 logger.warning(
@@ -355,45 +368,44 @@ class ToolParser:
         return [d for d in self.tools_dir.iterdir() if d.is_dir()]
 
     def _get_py_files(self) -> List[Path]:
-        """
-        Yield .py files from allowed_dirs only, excluding:
-          - known non-code directories (tests, docs, examples, …)
-          - known non-tool top-level files (setup.py, conftest.py)
-        """
         py_files = []
         for root_dir in self._get_search_roots():
             for root, dirs, files in os.walk(root_dir):
                 root_path = Path(root)
-
-                # Prune excluded directories in-place so os.walk won't descend
-                dirs[:] = [
-                    d for d in dirs
-                    if d.lower() not in _EXCLUDED_DIRS
-                ]
-
+                dirs[:] = [d for d in dirs if d.lower() not in _EXCLUDED_DIRS]
                 for fname in files:
                     if not fname.endswith(".py"):
                         continue
-
-                    # Exclude known non-tool files only at the repo root level
                     if root_path == root_dir and fname in _EXCLUDED_FILES:
-                        logger.debug(f"[PARSER] Skipping excluded file: {root_path / fname}")
+                        logger.debug(
+                            f"[PARSER] Skipping excluded file: {root_path / fname}"
+                        )
                         continue
-
                     py_files.append(root_path / fname)
-
         return py_files
 
-    def _read_code(self, file_path: Path) -> str:
-        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-            return f.read()
+    def _read_code(self, file_path: Path) -> Tuple[str, bool]:
+        """
+        Read source as UTF-8. If invalid bytes are present, decode with
+        replacement and return had_replacement=True so the caller can warn.
+        """
+        with open(file_path, "rb") as f:
+            raw = f.read()
+        try:
+            return raw.decode("utf-8"), False
+        except UnicodeDecodeError:
+            decoded = raw.decode("utf-8", errors="replace")
+            logger.warning(
+                f"[PARSER] Non-UTF-8 bytes in {file_path}; replaced with U+FFFD "
+                f"(extracted code may be subtly wrong)."
+            )
+            return decoded, True
 
     # ==================================================
     # NODE CLASSIFICATION
     # ==================================================
 
     def _is_main_guard(self, node: ast.stmt) -> bool:
-        """Return True for `if __name__ == '__main__':` blocks."""
         if not isinstance(node, ast.If):
             return False
         test = node.test
@@ -408,7 +420,7 @@ class ToolParser:
         comp = test.comparators[0]
         return isinstance(comp, ast.Constant) and comp.value == "__main__"
 
-    def _is_tool_function(self, node: ast.FunctionDef) -> bool:
+    def _is_tool_function(self, node) -> bool:
         for decorator in node.decorator_list:
             if isinstance(decorator, ast.Name) and decorator.id == "tool":
                 return True
@@ -421,42 +433,122 @@ class ToolParser:
                     return True
         return False
 
-    # ==================================================
-    # SOURCE EXTRACTION & REWRITING
-    # ==================================================
-
-    def _extract_function_with_decorators(self, node: ast.FunctionDef, code: str) -> str:
-        lines      = code.split("\n")
-        start_line = node.lineno - 1
-        decorators = []
-        idx        = start_line - 1
-
-        while idx >= 0 and lines[idx].strip().startswith("@"):
-            decorators.append(lines[idx])
-            idx -= 1
-
-        decorators.reverse()
-        func_block = decorators + lines[start_line:node.end_lineno]
-        return "\n".join(func_block)
-
-    def _rename_function(self, source: str, old_name: str, new_name: str) -> str:
+    def _is_fastmcp_assignment(self, node) -> bool:
         """
-        Replace the function definition name only (not arbitrary occurrences of
-        the string).  Handles both `def foo(` and `async def foo(`.
+        AST-level check: is this assignment's RHS a call to FastMCP(...)?
+        Replaces the old `"FastMCP" in src` substring check.
         """
-        import re
-        # Match `def <old_name>(` with word boundary to avoid partial matches
-        pattern = rf'\bdef\s+{re.escape(old_name)}\s*\('
-        replacement = f"def {new_name}("
-        return re.sub(pattern, replacement, source, count=1)
+        value = getattr(node, "value", None)
+        if value is None or not isinstance(value, ast.Call):
+            return False
+        func = value.func
+        if isinstance(func, ast.Name) and func.id == "FastMCP":
+            return True
+        if isinstance(func, ast.Attribute) and func.attr == "FastMCP":
+            return True
+        return False
 
-    def _extract_assigned_names(self, node: ast.Assign) -> List[str]:
+    # ==================================================
+    # SOURCE EXTRACTION
+    # ==================================================
+
+    def _extract_function_with_decorators(self, node, code: str) -> str:
+        """
+        Extract a function (sync or async) including all decorators.
+        Uses decorator_list[0].lineno when present so multi-line decorators
+        are captured correctly.
+        """
+        lines = code.split("\n")
+        if node.decorator_list:
+            start_line = node.decorator_list[0].lineno - 1
+        else:
+            start_line = node.lineno - 1
+        return "\n".join(lines[start_line:node.end_lineno])
+
+    def _extract_class_with_decorators(self, node: ast.ClassDef, code: str) -> str:
+        """Same approach for classes, which can also be decorated."""
+        lines = code.split("\n")
+        if node.decorator_list:
+            start_line = node.decorator_list[0].lineno - 1
+        else:
+            start_line = node.lineno - 1
+        return "\n".join(lines[start_line:node.end_lineno])
+
+    def _extract_assigned_names(self, node) -> List[str]:
         """
         Return simple variable names from an assignment's targets.
-        Only handles Name targets (not tuple unpacking, attribute sets, etc.)
+        Handles ast.Assign (incl. tuple unpacking of plain names) and
+        ast.AnnAssign.
         """
-        names = []
-        for target in node.targets:
-            if isinstance(target, ast.Name):
-                names.append(target.id)
+        names: List[str] = []
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    names.append(target.id)
+                elif isinstance(target, (ast.Tuple, ast.List)):
+                    for elt in target.elts:
+                        if isinstance(elt, ast.Name):
+                            names.append(elt.id)
+        elif isinstance(node, ast.AnnAssign):
+            if isinstance(node.target, ast.Name):
+                names.append(node.target.id)
         return names
+
+    # ==================================================
+    # IDENTIFIER-AWARE REWRITING
+    # ==================================================
+
+    def _apply_rename_map(self, source: str, rename_map: Dict[str, str]) -> str:
+        """
+        Rewrite identifier references using tokenize so only NAME tokens are
+        affected -- strings and comments are left alone. Rewrites every
+        occurrence in the block (def site AND call sites), which is what
+        keeps renamed helpers/globals callable after extraction.
+        """
+        if not rename_map:
+            return source
+
+        try:
+            tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
+        except tokenize.TokenizeError:
+            return self._apply_rename_map_regex(source, rename_map)
+
+        # Build a character-offset table so we can splice the original string
+        # without relying on tokenize.untokenize's whitespace reconstruction.
+        lines = source.splitlines(keepends=True)
+        line_starts = [0]
+        for ln in lines:
+            line_starts.append(line_starts[-1] + len(ln))
+
+        def pos_to_offset(row: int, col: int) -> int:
+            # tokenize rows are 1-indexed; cols are 0-indexed
+            if row - 1 >= len(line_starts):
+                return len(source)
+            return line_starts[row - 1] + col
+
+        substitutions: List[Tuple[int, int, str]] = []
+        for tok in tokens:
+            if tok.type == tokenize.NAME and tok.string in rename_map:
+                start = pos_to_offset(tok.start[0], tok.start[1])
+                end   = pos_to_offset(tok.end[0],   tok.end[1])
+                substitutions.append((start, end, rename_map[tok.string]))
+
+        # Apply in reverse so earlier offsets stay valid.
+        result = source
+        for start, end, new_str in reversed(substitutions):
+            result = result[:start] + new_str + result[end:]
+        return result
+
+    def _apply_rename_map_regex(self, source: str, rename_map: Dict[str, str]) -> str:
+        """Fallback: word-boundary regex replace if tokenize fails."""
+        for old, new in rename_map.items():
+            source = re.sub(rf'\b{re.escape(old)}\b', new, source)
+        return source
+
+    def _extract_identifiers(self, source: str) -> Set[str]:
+        """Identifier-aware set of NAME tokens in source."""
+        try:
+            tokens = tokenize.generate_tokens(io.StringIO(source).readline)
+            return {tok.string for tok in tokens if tok.type == tokenize.NAME}
+        except tokenize.TokenizeError:
+            return set(re.findall(r'\b[A-Za-z_]\w*\b', source))
