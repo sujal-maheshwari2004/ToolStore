@@ -1,6 +1,6 @@
 [project]
 name = "toolstorepy"
-version = "0.1.0"
+version = "0.2.0"
 description = "Automatic MCP server builder — describe tools in plain English, get a ready-to-run server."
 readme = "README.md"
 requires-python = ">=3.13"
