@@ -49,6 +49,21 @@ def _add_build_parser(subparsers):
                    help="Port the MCP server listens on (default: 8000)")
     p.add_argument("--force-refresh", action="store_true",
                    help="Force re-download of index archive")
+    p.add_argument("--llm-scan", action="store_true",
+                   help=(
+                       "Use an LLM to review each repo and decide include/skip "
+                       "automatically. Bypasses the interactive human prompt. "
+                       "Set the API key env var for your chosen model provider "
+                       "(e.g. ANTHROPIC_API_KEY, OPENAI_API_KEY, GOOGLE_API_KEY)."
+                   ))
+    p.add_argument("--llm-model", default="claude-sonnet-4-6",
+                   help=(
+                       "Model for LLM scanning. Any LangChain-supported string works: "
+                       "e.g. 'claude-sonnet-4-6', 'gpt-4o', 'gemini-2.0-flash'. "
+                       "The provider is inferred automatically. Ensure the "
+                       "corresponding API key env var is set (ANTHROPIC_API_KEY, "
+                       "OPENAI_API_KEY, GOOGLE_API_KEY, etc.)."
+                   ))
     p.add_argument("--verbose", action="store_true",
                    help="Verbose logging, plus full traceback on failure")
 
@@ -99,6 +114,8 @@ def _handle_build(args):
             install_requirements=args.install_requirements,
             host=args.host,
             port=args.port,
+            llm_scan=args.llm_scan,
+            llm_model=args.llm_model,
             verbose=args.verbose,
         )
         output_path = toolstore.build(

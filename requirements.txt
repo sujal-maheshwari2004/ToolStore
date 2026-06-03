@@ -4,3 +4,11 @@ chromadb>=1.5.0
 requests>=2.32.5
 sentence-transformers>=5.2.2
 transformers>=5.1.0
+
+# LLM scanning core (--llm-scan flag).
+# Also install the integration package for your chosen model provider:
+#   pip install langchain-anthropic    # Claude  -> ANTHROPIC_API_KEY
+#   pip install langchain-openai       # GPT     -> OPENAI_API_KEY
+#   pip install langchain-google-genai # Gemini  -> GOOGLE_API_KEY
+langchain>=0.3.0
+langchain-core>=0.3.0

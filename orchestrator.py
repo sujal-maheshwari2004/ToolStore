@@ -19,6 +19,7 @@ from .utils.security_scanner import (
     render_report_text,
     prompt_user_for_risky_repos,
 )
+from .utils.llm_scanner import llm_scan_all_repos
 
 
 class ToolStorePy:
@@ -32,6 +33,8 @@ class ToolStorePy:
         install_requirements: bool = False,
         host: str = "0.0.0.0",
         port: int = 8000,
+        llm_scan: bool = False,
+        llm_model: str = "claude-sonnet-4-6",
         verbose: bool = False,
     ):
         self.workspace = Path(workspace)
@@ -44,6 +47,8 @@ class ToolStorePy:
         self.install_requirements = install_requirements
         self.host                = host
         self.port                = port
+        self.llm_scan            = llm_scan
+        self.llm_model           = llm_model
         self.verbose             = verbose
 
         self._setup_logging()
@@ -209,9 +214,41 @@ class ToolStorePy:
         # SECURITY SCAN
         # --------------------------------------------------
 
-        self.logger.info("Running security scan on cloned repositories...")
-        scan_reports = scan_all_repos(self.tools_dir)
+        self.logger.info("Running AST security scan on cloned repositories...")
+        ast_reports = scan_all_repos(self.tools_dir)
 
+        if self.llm_scan:
+            # LLM scan: reviews all repos and makes the include/skip decision
+            # autonomously. The human prompt is skipped entirely.
+            self.logger.info(
+                f"Running LLM security scan (model={self.llm_model})..."
+            )
+            try:
+                llm_reports, allowed_repos, skipped_repos = llm_scan_all_repos(
+                    self.tools_dir,
+                    model_name=self.llm_model,
+                )
+            except RuntimeError as exc:
+                # API key missing or unrecoverable error -- abort cleanly
+                raise RuntimeError(f"LLM scan failed: {exc}") from exc
+
+            # Merge LLM findings into the matching AST report so the
+            # combined report file shows everything in one place.
+            llm_by_name = {r.repo_name: r for r in llm_reports}
+            for ast_report in ast_reports:
+                llm_report = llm_by_name.get(ast_report.repo_name)
+                if llm_report:
+                    ast_report.findings.extend(llm_report.findings)
+
+            scan_reports = ast_reports
+
+        else:
+            # AST only: human is prompted on HIGH findings as before.
+            scan_reports  = ast_reports
+            allowed_repos = None   # resolved below
+            skipped_repos = None
+
+        # Render + save the combined report regardless of scan mode.
         report_text = render_report_text(scan_reports)
         print()
         print(report_text)
@@ -220,13 +257,25 @@ class ToolStorePy:
         report_path.write_text(report_text, encoding="utf-8")
         self.logger.info(f"Security report saved -> {report_path}")
 
-        allowed_repos, skipped_repos = prompt_user_for_risky_repos(scan_reports)
-
-        if skipped_repos:
+        if self.llm_scan:
+            # LLM already decided; just log the outcome.
+            if skipped_repos:
+                self.logger.info(
+                    f"LLM skipped {len(skipped_repos)} repo(s): "
+                    + ", ".join(skipped_repos)
+                )
             self.logger.info(
-                f"Skipping {len(skipped_repos)} repo(s) due to HIGH findings: "
-                + ", ".join(skipped_repos)
+                f"LLM approved {len(allowed_repos)} repo(s): "
+                + ", ".join(allowed_repos)
             )
+        else:
+            # Human prompt path (AST HIGH findings only).
+            allowed_repos, skipped_repos = prompt_user_for_risky_repos(scan_reports)
+            if skipped_repos:
+                self.logger.info(
+                    f"Skipping {len(skipped_repos)} repo(s) due to HIGH findings: "
+                    + ", ".join(skipped_repos)
+                )
 
         if not allowed_repos:
             raise RuntimeError(
