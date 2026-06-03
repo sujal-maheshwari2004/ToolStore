@@ -20,6 +20,8 @@ class MCPBuilder:
         skipped_repos: Optional[List[str]] = None,
         server_name: str = "UtilityTools",
         transport: str = "streamable-http",
+        host: str = "0.0.0.0",
+        port: int = 8000,
         verbose: bool = False,
     ):
         self.tools_dir     = Path(tools_dir)
@@ -28,6 +30,8 @@ class MCPBuilder:
         self.skipped_repos = set(skipped_repos or [])
         self.server_name   = server_name
         self.transport     = transport
+        self.host          = host
+        self.port          = port
 
     # ==================================================
     # PUBLIC ENTRYPOINT
@@ -356,7 +360,11 @@ class MCPBuilder:
 
         buffer.write("\n")
         buffer.write('if __name__ == "__main__":\n')
-        buffer.write(f"    mcp.run(transport={self.transport!r})\n")
+        buffer.write(
+            f"    mcp.run(transport={self.transport!r}, "
+            f"host={self.host!r}, "
+            f"port={self.port!r})\n"
+        )
 
         content = buffer.getvalue()
 

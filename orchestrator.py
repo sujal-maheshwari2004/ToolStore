@@ -30,6 +30,8 @@ class ToolStorePy:
         encoder_model: str = "all-MiniLM-L6-v2",
         cross_encoder_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
         install_requirements: bool = False,
+        host: str = "0.0.0.0",
+        port: int = 8000,
         verbose: bool = False,
     ):
         self.workspace = Path(workspace)
@@ -40,6 +42,8 @@ class ToolStorePy:
         self.encoder_model       = encoder_model
         self.cross_encoder_model = cross_encoder_model
         self.install_requirements = install_requirements
+        self.host                = host
+        self.port                = port
         self.verbose             = verbose
 
         self._setup_logging()
@@ -253,6 +257,8 @@ class ToolStorePy:
             self.output_file,
             env_keys=env_keys,
             skipped_repos=skipped_repos,
+            host=self.host,
+            port=self.port,
             verbose=self.verbose,
         )
         builder.build()

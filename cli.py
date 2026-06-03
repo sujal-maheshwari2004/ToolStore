@@ -43,6 +43,10 @@ def _add_build_parser(subparsers):
                    help="Workspace directory (default: toolstorepy_workspace)")
     p.add_argument("--install-requirements", action="store_true",
                    help="Install requirements.txt from cloned repositories")
+    p.add_argument("--host", default="0.0.0.0",
+                   help="Host the MCP server binds on (default: 0.0.0.0)")
+    p.add_argument("--port", type=int, default=8000,
+                   help="Port the MCP server listens on (default: 8000)")
     p.add_argument("--force-refresh", action="store_true",
                    help="Force re-download of index archive")
     p.add_argument("--verbose", action="store_true",
@@ -93,6 +97,8 @@ def _handle_build(args):
         toolstore = ToolStorePy(
             workspace=args.workspace,
             install_requirements=args.install_requirements,
+            host=args.host,
+            port=args.port,
             verbose=args.verbose,
         )
         output_path = toolstore.build(
