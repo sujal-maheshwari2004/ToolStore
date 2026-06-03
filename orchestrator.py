@@ -67,9 +67,9 @@ class ToolStorePy:
 
     def _ensure_workspace_venv(self) -> Path:
         """
-        Create the workspace venv if it doesn't already exist. Idempotent and
-        cheap to re-call: pip is only upgraded and the MCP runtime only
-        installed on first creation.
+        Create the workspace venv if it doesn't already exist.  Idempotent
+        and cheap to re-call: pip upgrade and MCP runtime install only run
+        on first creation (the marker is the python executable existing).
         """
         venv_path   = self.workspace / ".venv"
         python_exec = self._venv_python_exec(venv_path)
@@ -138,15 +138,26 @@ class ToolStorePy:
         queries: str,
         index: Optional[str] = None,
         index_url: Optional[str] = None,
+        index_sha256: Optional[str] = None,
         force_refresh: bool = False,
     ) -> Path:
 
         self.logger.info("Resolving index...")
-        resolved_url = resolve_index(index=index, index_url=index_url)
+        # resolve_index now returns (url, sha256); sha256 may be None for
+        # user-supplied URLs where no checksum was provided.
+        resolved_url, resolved_sha256 = resolve_index(
+            index=index,
+            index_url=index_url,
+            index_sha256=index_sha256,
+        )
 
         self.logger.info("Downloading index...")
         downloader = IndexDownloader(self.index_dir)
-        db_path = downloader.download(resolved_url, force_refresh=force_refresh)
+        db_path = downloader.download(
+            resolved_url,
+            force_refresh=force_refresh,
+            sha256=resolved_sha256,
+        )
 
         self.logger.info("Loading queries...")
         query_list = self._load_queries(queries)
@@ -169,8 +180,7 @@ class ToolStorePy:
         unique_links = list({m["tool_git_link"] for m in valid_matches})
 
         # If --install-requirements, we need a venv before cloning so the
-        # loader can install into it. Otherwise we defer venv creation to
-        # just before running.
+        # loader can install into it.  Otherwise defer until just before run.
         python_exec: Optional[Path] = None
         if self.install_requirements:
             python_exec = self._ensure_workspace_venv()
@@ -223,11 +233,14 @@ class ToolStorePy:
         # --------------------------------------------------
         # ENV EXAMPLE PROCESSING
         # --------------------------------------------------
+        # Pass skipped_repos so security-rejected repos don't contribute
+        # their .env.example keys to the merged secrets file.
 
         self.logger.info("Scanning for .env.example files...")
         env_keys, missing_keys = process_env_examples(
             tools_dir=self.tools_dir,
             workspace=self.workspace,
+            skipped_repos=set(skipped_repos),
         )
 
         # --------------------------------------------------
@@ -306,9 +319,9 @@ class ToolStorePy:
 
     def _print_run_commands(self, python_exec: Path):
         """
-        Plain-ASCII summary of how to run the server. No box-drawing chars
-        or emoji so the alignment can't drift across terminals that size
-        Unicode glyphs differently.
+        Plain-ASCII summary of how to run the server.  No box-drawing chars
+        or emoji so alignment can't drift across terminals that size Unicode
+        glyphs differently.
         """
         sep = "-" * 64
         simple_cmd = f"python {self.output_file.name}"
@@ -448,10 +461,10 @@ class ToolStorePy:
         """
         Clone each repo into the workspace via the shared bare-repo cache.
 
-        RepoLoader now populates the cache itself on miss, so the previous
+        RepoLoader populates the cache itself on miss, so the previous
         two-step (cache.populate_many + loader.process) is collapsed into
-        one pass. Returns the loader's failures list -- the orchestrator
-        uses this to warn the user about repos that didn't make it in.
+        one pass.  Returns the loader's failures list so the orchestrator
+        can warn the user about repos that didn't make it in.
         """
         repo_urls = list(repo_urls)
         cache = RepoCache()

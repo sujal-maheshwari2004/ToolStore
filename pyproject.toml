@@ -3,13 +3,22 @@ name = "toolstorepy"
 version = "0.1.0"
 description = "Automatic MCP server builder — describe tools in plain English, get a ready-to-run server."
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.13"
+license = {text = "MIT"}
+authors = [
+    {name = "Sujal Maheshwari", email = "sujalmaheshwari07@gmail.com"},
+]
 dependencies = [
     "chromadb>=1.5.0",
     "requests>=2.32.5",
     "sentence-transformers>=5.2.2",
     "transformers>=5.1.0",
 ]
+
+[project.urls]
+Documentation = "https://tool-store-py-docs.vercel.app/"
+Repository    = "https://github.com/sujal-maheshwari2004/toolstorepy"
+"Bug Tracker" = "https://github.com/sujal-maheshwari2004/toolstorepy/issues"
 
 [project.scripts]
 toolstorepy = "toolstorepy.cli:main"

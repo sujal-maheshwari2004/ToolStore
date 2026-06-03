@@ -1,13 +1,25 @@
-from typing import Optional
+from typing import Optional, Tuple
 
 
 # ------------------------------------------------------------------
 # Built-in Index Registry
 # ------------------------------------------------------------------
+# Each entry is {"url": "...", "sha256": "..."|None}.
+# sha256 is None while the release is pending; once the release is
+# published, fill in the hex digest of the zip so downloader.py's
+# integrity check fires automatically on the default path.
+# ------------------------------------------------------------------
 
 BUILTIN_INDEXES = {
-    # Active once the v0.1.0 GitHub Release is published with core-tools-v1.zip attached
-    "core-tools": "https://github.com/sujal-maheshwari2004/ToolStore/releases/download/v0.1.0/core-tools-v1.zip",
+    "core-tools": {
+        "url": (
+            "https://github.com/sujal-maheshwari2004/ToolStore"
+            "/releases/download/v0.1.0/core-tools-v1.zip"
+        ),
+        # Fill in after publishing the release:
+        #   sha256sum core-tools-v1.zip
+        "sha256": None,
+    },
 }
 
 
@@ -18,16 +30,21 @@ BUILTIN_INDEXES = {
 def resolve_index(
     index: Optional[str] = None,
     index_url: Optional[str] = None,
-) -> str:
+    index_sha256: Optional[str] = None,
+) -> Tuple[str, Optional[str]]:
     """
     Resolve either a built-in index name or a direct index URL.
 
     Rules:
-        - Exactly one of `index` or `index_url` must be provided.
-        - If `index` is provided, it must exist in BUILTIN_INDEXES.
-        - Returns a download URL string.
-    """
+        - Exactly one of ``index`` or ``index_url`` must be provided.
+        - If ``index`` is provided it must exist in BUILTIN_INDEXES.
+        - ``index_sha256`` is only meaningful when ``index_url`` is used;
+          for built-in indexes the sha256 stored in BUILTIN_INDEXES is
+          authoritative and ``index_sha256`` is silently ignored.
 
+    Returns:
+        (url, sha256) where sha256 may be None if not known.
+    """
     if index and index_url:
         raise ValueError(
             "Provide either 'index' or 'index_url', not both."
@@ -45,6 +62,8 @@ def resolve_index(
                 f"Unknown index '{index}'. "
                 f"Available indexes: {available}"
             )
-        return BUILTIN_INDEXES[index]
+        entry = BUILTIN_INDEXES[index]
+        return entry["url"], entry["sha256"]
 
-    return index_url
+    # Direct URL: caller may optionally supply a checksum.
+    return index_url, index_sha256

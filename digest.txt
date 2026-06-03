@@ -52,6 +52,7 @@ FILE: cli.py
 import argparse
 import sys
 import json
+import traceback
 from pathlib import Path
 
 from .orchestrator import ToolStorePy
@@ -60,162 +61,226 @@ from .orchestrator import ToolStorePy
 def main():
     parser = argparse.ArgumentParser(
         prog="toolstorepy",
-        description="ToolStorePy - Automatic MCP Tool Builder"
+        description="ToolStorePy - Automatic MCP Tool Builder",
     )
-
     subparsers = parser.add_subparsers(dest="command")
 
-    # --------------------------------------------------
-    # BUILD COMMAND
-    # --------------------------------------------------
+    _add_build_parser(subparsers)
+    cache_parser = _add_cache_parser(subparsers)
 
-    build_parser = subparsers.add_parser(
+    args = parser.parse_args()
+
+    if args.command == "build":
+        _handle_build(args)
+    elif args.command == "cache":
+        _handle_cache(args, cache_parser)
+    else:
+        parser.print_help()
+
+
+# --------------------------------------------------
+# ARGUMENT DEFINITIONS
+# --------------------------------------------------
+
+def _add_build_parser(subparsers):
+    p = subparsers.add_parser(
         "build",
-        help="Build unified MCP server from tool index and queries"
+        help="Build unified MCP server from tool index and queries",
     )
+    p.add_argument("--queries",   required=True, help="Path to queries.json file")
+    p.add_argument("--index",     help="Name of built-in tool index")
+    p.add_argument("--index-url", help="Direct URL to a downloadable vector index archive")
+    p.add_argument("--workspace", default="toolstorepy_workspace",
+                   help="Workspace directory (default: toolstorepy_workspace)")
+    p.add_argument("--install-requirements", action="store_true",
+                   help="Install requirements.txt from cloned repositories")
+    p.add_argument("--force-refresh", action="store_true",
+                   help="Force re-download of index archive")
+    p.add_argument("--verbose", action="store_true",
+                   help="Verbose logging, plus full traceback on failure")
 
-    build_parser.add_argument(
-        "--queries",
-        required=True,
-        help="Path to queries.json file"
-    )
 
-    build_parser.add_argument(
-        "--index",
-        help="Name of built-in tool index"
-    )
-
-    build_parser.add_argument(
-        "--index-url",
-        help="Direct URL to downloadable vector index archive"
-    )
-
-    build_parser.add_argument(
-        "--workspace",
-        default="toolstorepy_workspace",
-        help="Workspace directory (default: toolstorepy_workspace)"
-    )
-
-    build_parser.add_argument(
-        "--install-requirements",
-        action="store_true",
-        help="Install requirements.txt from cloned repositories"
-    )
-
-    build_parser.add_argument(
-        "--force-refresh",
-        action="store_true",
-        help="Force re-download of index archive"
-    )
-
-    build_parser.add_argument(
-        "--verbose",
-        action="store_true",
-        help="Enable verbose logging"
-    )
-
-    # --------------------------------------------------
-    # CACHE COMMAND
-    # --------------------------------------------------
-
-    cache_parser = subparsers.add_parser(
-        "cache",
-        help="Manage local repo cache"
-    )
+def _add_cache_parser(subparsers):
+    cache_parser = subparsers.add_parser("cache", help="Manage local repo cache")
     cache_subparsers = cache_parser.add_subparsers(dest="cache_command")
 
-    pop_parser = cache_subparsers.add_parser(
+    pop = cache_subparsers.add_parser(
         "populate",
-        help="Cache repos from a queries.json"
+        help="Cache repos from a queries file or a list of URLs",
+        description=(
+            "Pre-warm the bare-repo cache. Provide either --queries pointing "
+            "at a JSON file where each item has a 'git_link' field, OR one or "
+            "more --url flags with direct git URLs. A queries file containing "
+            "only 'tool_description' fields cannot be used here -- run "
+            "'toolstorepy build' first to resolve descriptions to git URLs."
+        ),
     )
-    pop_parser.add_argument(
-        "--queries",
-        required=True,
-        help="Path to queries.json"
-    )
-    pop_parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Re-cache existing repos"
-    )
+    src = pop.add_mutually_exclusive_group(required=True)
+    src.add_argument("--queries", help="JSON file of items with a 'git_link' field")
+    src.add_argument("--url", action="append",
+                     help="Direct git URL (can be repeated)")
+    pop.add_argument("--force", action="store_true",
+                     help="Re-cache repos that are already cached")
 
     cache_subparsers.add_parser("list",  help="List all cached repos")
     cache_subparsers.add_parser("clear", help="Clear all cached repos")
 
-    # --------------------------------------------------
-    # PARSE
-    # --------------------------------------------------
+    return cache_parser
 
-    args = parser.parse_args()
 
-    # --------------------------------------------------
-    # HANDLE BUILD
-    # --------------------------------------------------
+# --------------------------------------------------
+# HANDLERS
+# --------------------------------------------------
 
-    if args.command == "build":
+def _handle_build(args):
+    if not args.index and not args.index_url:
+        print("Error: You must provide either --index or --index-url.", file=sys.stderr)
+        sys.exit(1)
+    if args.index and args.index_url:
+        print("Error: Provide either --index or --index-url, not both.", file=sys.stderr)
+        sys.exit(1)
 
-        if not args.index and not args.index_url:
-            print("Error: You must provide either --index or --index-url.")
+    try:
+        toolstore = ToolStorePy(
+            workspace=args.workspace,
+            install_requirements=args.install_requirements,
+            verbose=args.verbose,
+        )
+        output_path = toolstore.build(
+            queries=args.queries,
+            index=args.index,
+            index_url=args.index_url,
+            force_refresh=args.force_refresh,
+        )
+        print(f"\nMCP server generated at: {output_path}")
+    except Exception as exc:
+        if args.verbose:
+            traceback.print_exc()
+        print(f"\nBuild failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _handle_cache(args, cache_parser):
+    from .loader.cache import RepoCache
+    repo_cache = RepoCache()
+
+    if args.cache_command == "populate":
+        urls = _resolve_populate_urls(args)
+        if not urls:
+            print("Error: No URLs to cache (empty input).", file=sys.stderr)
             sys.exit(1)
-
-        if args.index and args.index_url:
-            print("Error: Provide either --index or --index-url, not both.")
+        print(f"Caching {len(urls)} repo(s)...")
+        failed = repo_cache.populate_many(urls, force=args.force)
+        if failed:
+            print(
+                f"\nFailed to cache {len(failed)} repo(s):",
+                file=sys.stderr,
+            )
+            for url in failed:
+                print(f"  - {url}", file=sys.stderr)
             sys.exit(1)
+        print("Done.")
 
+    elif args.cache_command == "list":
+        cached = repo_cache.list_cached()
+        print(f"Cached repos ({len(cached)}):")
+        for name in sorted(cached):
+            print(f"  {name}")
+
+    elif args.cache_command == "clear":
         try:
-            toolstore = ToolStorePy(
-                workspace=args.workspace,
-                install_requirements=args.install_requirements,
-                verbose=args.verbose,
-            )
-
-            output_path = toolstore.build(
-                queries=args.queries,
-                index=args.index,
-                index_url=args.index_url,
-                force_refresh=args.force_refresh,
-            )
-
-            print(f"\nMCP server generated at: {output_path}")
-
-        except Exception as e:
-            print(f"\nBuild failed: {e}")
-            sys.exit(1)
-
-    # --------------------------------------------------
-    # HANDLE CACHE
-    # --------------------------------------------------
-
-    elif args.command == "cache":
-        from .loader.cache import RepoCache
-
-        repo_cache = RepoCache()
-
-        if args.cache_command == "populate":
-            with open(args.queries) as f:
-                data = json.load(f)
-            urls = list({item["git_link"] for item in data})
-            print(f"Caching {len(urls)} repos...")
-            repo_cache.populate_many(urls, force=args.force)
-            print("Done.")
-
-        elif args.cache_command == "list":
-            cached = repo_cache.list_cached()
-            print(f"Cached repos ({len(cached)}):")
-            for name in sorted(cached):
-                print(f"  {name}")
-
-        elif args.cache_command == "clear":
-            confirm = input("Clear all cached repos? [y/N]: ")
-            if confirm.lower() == "y":
-                repo_cache.clear()
-                print("Cache cleared.")
-
+            confirm = input("Clear all cached repos? [y/N]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            print("Aborted.")
+            return
+        if confirm in ("y", "yes"):
+            repo_cache.clear()
+            print("Cache cleared.")
         else:
-            cache_parser.print_help()
+            print("Aborted.")
 
     else:
-        parser.print_help()
+        cache_parser.print_help()
+
+
+def _resolve_populate_urls(args) -> list:
+    """Resolve the URL list for `cache populate` from either --url or --queries."""
+    if args.url:
+        # De-dupe while preserving first-seen order.
+        seen, ordered = set(), []
+        for u in args.url:
+            if u and u not in seen:
+                seen.add(u)
+                ordered.append(u)
+        return ordered
+
+    queries_path = Path(args.queries)
+    if not queries_path.exists():
+        print(f"Error: Queries file not found: {args.queries}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        with open(queries_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except json.JSONDecodeError as exc:
+        print(f"Error: Queries file is not valid JSON: {exc}", file=sys.stderr)
+        sys.exit(1)
+    except OSError as exc:
+        print(f"Error: Could not read queries file: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if not isinstance(data, list):
+        print(
+            f"Error: Queries file must be a JSON list, got "
+            f"{type(data).__name__}.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    urls, missing = [], 0
+    for i, item in enumerate(data):
+        if not isinstance(item, dict):
+            print(
+                f"Error: Item #{i} in queries file is not an object.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        link = item.get("git_link")
+        if isinstance(link, str) and link.strip():
+            urls.append(link.strip())
+        else:
+            missing += 1
+
+    if not urls:
+        print(
+            "Error: No 'git_link' fields found in the queries file.\n"
+            "       'cache populate --queries FILE' expects pre-resolved URLs.\n"
+            "       To cache from a description-only queries.json, run\n"
+            "       'toolstorepy build' first (which resolves descriptions to\n"
+            "       URLs and caches as it goes), or pass URLs directly via --url.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if missing:
+        print(
+            f"Warning: {missing} item(s) in queries file had no 'git_link' "
+            f"and were skipped.",
+            file=sys.stderr,
+        )
+
+    # De-dupe.
+    seen, ordered = set(), []
+    for u in urls:
+        if u not in seen:
+            seen.add(u)
+            ordered.append(u)
+    return ordered
+
+
+if __name__ == "__main__":
+    main()
 
 
 ================================================
@@ -292,7 +357,478 @@ in any public-facing derivative work.
 ================================================
 FILE: orchestrator.py
 ================================================
-Error reading file with 'cp1252': 'charmap' codec can't decode byte 0x90 in position 9358: character maps to <undefined>
+from pathlib import Path
+from typing import Optional, List, Iterable, Tuple
+import json
+import sys
+import subprocess
+import venv
+import logging
+
+from .config import configure_external_logging
+from .index.registry import resolve_index
+from .index.downloader import IndexDownloader
+from .search.semantic import SemanticSearcher
+from .loader.repo import RepoLoader
+from .loader.cache import RepoCache
+from .builder.mcp_builder import MCPBuilder
+from .utils.env_merger import process_env_examples
+from .utils.security_scanner import (
+    scan_all_repos,
+    render_report_text,
+    prompt_user_for_risky_repos,
+)
+
+
+class ToolStorePy:
+    """Main orchestration layer for ToolStorePy."""
+
+    def __init__(
+        self,
+        workspace: str = "toolstorepy_workspace",
+        encoder_model: str = "all-MiniLM-L6-v2",
+        cross_encoder_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
+        install_requirements: bool = False,
+        verbose: bool = False,
+    ):
+        self.workspace = Path(workspace)
+        self.index_dir = self.workspace / "index_db"
+        self.tools_dir = self.workspace / "tools"
+        self.output_file = self.workspace / "mcp_unified_server.py"
+
+        self.encoder_model       = encoder_model
+        self.cross_encoder_model = cross_encoder_model
+        self.install_requirements = install_requirements
+        self.verbose             = verbose
+
+        self._setup_logging()
+        configure_external_logging(verbose=self.verbose)
+        self._prepare_workspace()
+
+    # --------------------------------------------------
+    # LOGGING / WORKSPACE
+    # --------------------------------------------------
+
+    def _setup_logging(self):
+        level = logging.DEBUG if self.verbose else logging.INFO
+        logging.basicConfig(level=level, format="%(levelname)s | %(message)s")
+        self.logger = logging.getLogger("ToolStorePy")
+
+    def _prepare_workspace(self):
+        self.workspace.mkdir(parents=True, exist_ok=True)
+        self.index_dir.mkdir(parents=True, exist_ok=True)
+        self.tools_dir.mkdir(parents=True, exist_ok=True)
+        self.logger.debug("Workspace prepared.")
+
+    # --------------------------------------------------
+    # VENV MANAGEMENT
+    # --------------------------------------------------
+
+    def _ensure_workspace_venv(self) -> Path:
+        """
+        Create the workspace venv if it doesn't already exist. Idempotent and
+        cheap to re-call: pip is only upgraded and the MCP runtime only
+        installed on first creation.
+        """
+        venv_path   = self.workspace / ".venv"
+        python_exec = self._venv_python_exec(venv_path)
+
+        if python_exec.exists():
+            return python_exec
+
+        self.logger.info("Creating workspace virtual environment...")
+        try:
+            venv.EnvBuilder(with_pip=True).create(venv_path)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to create venv at {venv_path}: {exc}"
+            ) from exc
+
+        python_exec = self._venv_python_exec(venv_path)
+        if not python_exec.exists():
+            raise RuntimeError(
+                f"Created venv at {venv_path} but expected python at "
+                f"{python_exec} does not exist."
+            )
+
+        self._venv_pip_install(python_exec, ["--upgrade", "pip"], label="upgrade pip")
+        self.logger.info("Installing MCP runtime in workspace venv...")
+        self._venv_pip_install(python_exec, ["mcp", "mcp[cli]"], label="install mcp runtime")
+
+        return python_exec
+
+    @staticmethod
+    def _venv_python_exec(venv_path: Path) -> Path:
+        if sys.platform == "win32":
+            return venv_path / "Scripts" / "python.exe"
+        return venv_path / "bin" / "python"
+
+    def _venv_pip_install(
+        self,
+        python_exec: Path,
+        args: List[str],
+        label: str,
+    ) -> None:
+        """Run pip in the workspace venv; surface failures with stderr."""
+        try:
+            subprocess.run(
+                [str(python_exec), "-m", "pip", "install",
+                 "--quiet",
+                 "--disable-pip-version-check",
+                 "--no-warn-script-location",
+                 *args],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            stderr_tail = "\n".join((exc.stderr or "").splitlines()[-10:])
+            raise RuntimeError(
+                f"pip failed in workspace venv during '{label}'.\n"
+                f"{stderr_tail or '(no stderr captured)'}"
+            ) from exc
+
+    # --------------------------------------------------
+    # PUBLIC ENTRYPOINT
+    # --------------------------------------------------
+
+    def build(
+        self,
+        queries: str,
+        index: Optional[str] = None,
+        index_url: Optional[str] = None,
+        force_refresh: bool = False,
+    ) -> Path:
+
+        self.logger.info("Resolving index...")
+        resolved_url = resolve_index(index=index, index_url=index_url)
+
+        self.logger.info("Downloading index...")
+        downloader = IndexDownloader(self.index_dir)
+        db_path = downloader.download(resolved_url, force_refresh=force_refresh)
+
+        self.logger.info("Loading queries...")
+        query_list = self._load_queries(queries)
+        if not query_list:
+            raise ValueError("No queries provided.")
+
+        self.logger.info("Running semantic search...")
+        matches = self._run_search(query_list, db_path)
+
+        valid_matches = [m for m in matches if m.get("tool_git_link")]
+        if not valid_matches:
+            raise RuntimeError("No matching tools found for given queries.")
+
+        self.logger.info(f"Found {len(valid_matches)} matching tools.")
+        for match in valid_matches:
+            name = match.get("tool_name")
+            if name:
+                self.logger.info(f"Tool selected: {name}")
+
+        unique_links = list({m["tool_git_link"] for m in valid_matches})
+
+        # If --install-requirements, we need a venv before cloning so the
+        # loader can install into it. Otherwise we defer venv creation to
+        # just before running.
+        python_exec: Optional[Path] = None
+        if self.install_requirements:
+            python_exec = self._ensure_workspace_venv()
+
+        self.logger.info("Cloning repositories...")
+        clone_failures = self._clone_repositories(unique_links, python_exec)
+
+        if clone_failures:
+            failed_names = [name for (_, name, _) in clone_failures]
+            self.logger.warning(
+                f"{len(clone_failures)} repo(s) failed to clone and will be "
+                f"excluded: {', '.join(failed_names)}"
+            )
+
+        if len(unique_links) - len(clone_failures) == 0:
+            raise RuntimeError(
+                "No repositories were successfully cloned for this build. "
+                "Cannot proceed."
+            )
+
+        # --------------------------------------------------
+        # SECURITY SCAN
+        # --------------------------------------------------
+
+        self.logger.info("Running security scan on cloned repositories...")
+        scan_reports = scan_all_repos(self.tools_dir)
+
+        report_text = render_report_text(scan_reports)
+        print()
+        print(report_text)
+
+        report_path = self.workspace / "security_report.txt"
+        report_path.write_text(report_text, encoding="utf-8")
+        self.logger.info(f"Security report saved -> {report_path}")
+
+        allowed_repos, skipped_repos = prompt_user_for_risky_repos(scan_reports)
+
+        if skipped_repos:
+            self.logger.info(
+                f"Skipping {len(skipped_repos)} repo(s) due to HIGH findings: "
+                + ", ".join(skipped_repos)
+            )
+
+        if not allowed_repos:
+            raise RuntimeError(
+                "All matched repos were skipped after security review. "
+                "Nothing to build."
+            )
+
+        # --------------------------------------------------
+        # ENV EXAMPLE PROCESSING
+        # --------------------------------------------------
+
+        self.logger.info("Scanning for .env.example files...")
+        env_keys, missing_keys = process_env_examples(
+            tools_dir=self.tools_dir,
+            workspace=self.workspace,
+        )
+
+        # --------------------------------------------------
+        # BUILD
+        # --------------------------------------------------
+
+        self.logger.info("Building unified MCP server...")
+        builder = MCPBuilder(
+            self.tools_dir,
+            self.output_file,
+            env_keys=env_keys,
+            skipped_repos=skipped_repos,
+            verbose=self.verbose,
+        )
+        builder.build()
+
+        # --------------------------------------------------
+        # POST-BUILD WARNINGS
+        # --------------------------------------------------
+
+        self._print_env_warnings(env_keys, missing_keys)
+        self._print_clone_failure_warning(clone_failures)
+
+        # --------------------------------------------------
+        # PREPARE VENV (always, so the run command is accurate)
+        # --------------------------------------------------
+
+        self.logger.info("Preparing runtime environment...")
+        python_exec = self._ensure_workspace_venv()
+
+        # --------------------------------------------------
+        # INTERACTIVE RUN PROMPT
+        # --------------------------------------------------
+
+        self._prompt_and_run(python_exec)
+
+        return self.output_file
+
+    # --------------------------------------------------
+    # RUN PROMPT
+    # --------------------------------------------------
+
+    def _prompt_and_run(self, python_exec: Path):
+        self._print_run_commands(python_exec)
+        print()
+        while True:
+            try:
+                answer = input("  >  Run the MCP server now? [y/N]: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                answer = "n"
+                print()
+
+            if answer in ("y", "yes"):
+                print()
+                self.logger.info("Launching MCP server...")
+                try:
+                    subprocess.run(
+                        [str(python_exec), str(self.output_file)],
+                        check=True,
+                    )
+                except subprocess.CalledProcessError as exc:
+                    self.logger.error(
+                        f"MCP server exited with status {exc.returncode}."
+                    )
+                except KeyboardInterrupt:
+                    self.logger.info("MCP server interrupted by user.")
+                break
+            elif answer in ("n", "no", ""):
+                print()
+                self.logger.info(
+                    "Server not started. Use the commands above when ready."
+                )
+                break
+            else:
+                print("  Please enter y or n.")
+
+    def _print_run_commands(self, python_exec: Path):
+        """
+        Plain-ASCII summary of how to run the server. No box-drawing chars
+        or emoji so the alignment can't drift across terminals that size
+        Unicode glyphs differently.
+        """
+        sep = "-" * 64
+        simple_cmd = f"python {self.output_file.name}"
+        full_cmd   = f"{python_exec.resolve()} {self.output_file.resolve()}"
+
+        print()
+        print(sep)
+        print("  MCP SERVER BUILT SUCCESSFULLY")
+        print(sep)
+        print("  Server file:")
+        print(f"    {self.output_file.resolve()}")
+        print()
+        print("  Simple command (run from inside workspace dir):")
+        print(f"    {simple_cmd}")
+        print()
+        print("  Full command (run from anywhere):")
+        print(f"    {full_cmd}")
+        print(sep)
+
+    # --------------------------------------------------
+    # WARNINGS / NOTICES
+    # --------------------------------------------------
+
+    def _print_env_warnings(self, env_keys: list, missing_keys: list):
+        if not env_keys:
+            return
+
+        sep = "!" * 64
+        print()
+        print(sep)
+        print("!! SECRET CONFIGURATION REQUIRED")
+        print(sep)
+        print("!! One or more of your tools requires environment variables.")
+        print("!! A merged .env.example has been written to:")
+        print(f"!!   {self.workspace / '.env.example'}")
+        print("!!")
+        print("!! Steps:")
+        print("!!   1. Copy .env.example -> .env in your workspace")
+        print("!!   2. Fill in the required values")
+        print("!!   3. Re-run the server")
+        print("!!")
+        print(f"!! Required keys ({len(env_keys)}):")
+        for key in env_keys:
+            print(f"!!   - {key}")
+        print(sep)
+
+        if missing_keys:
+            print()
+            print(sep)
+            print("!! MISSING KEYS IN YOUR EXISTING .env")
+            print(sep)
+            print("!! Found workspace/.env but these keys are absent/empty:")
+            for key in missing_keys:
+                print(f"!!   - {key}")
+            print(sep)
+
+        print()
+
+    def _print_clone_failure_warning(
+        self,
+        clone_failures: List[Tuple[str, str, str]],
+    ):
+        if not clone_failures:
+            return
+
+        sep = "!" * 64
+        print()
+        print(sep)
+        print("!! REPOSITORIES THAT FAILED TO CLONE")
+        print(sep)
+        print("!! The following repos could not be cloned and were excluded")
+        print("!! from the generated server:")
+        print("!!")
+        for url, name, stderr in clone_failures:
+            short_err = (
+                (stderr or "").splitlines()[-1]
+                if stderr else "(no error captured)"
+            )
+            print(f"!!   - {name}")
+            print(f"!!     url:   {url}")
+            print(f"!!     error: {short_err}")
+        print(sep)
+        print()
+
+    # --------------------------------------------------
+    # INTERNAL HELPERS
+    # --------------------------------------------------
+
+    def _load_queries(self, queries_path: str) -> List[str]:
+        path = Path(queries_path)
+        if not path.exists():
+            raise FileNotFoundError(f"Queries file not found: {queries_path}")
+
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"Queries file is not valid JSON ({queries_path}): {exc}"
+            ) from exc
+
+        if not isinstance(data, list):
+            raise ValueError(
+                f"Queries file must contain a JSON list, got "
+                f"{type(data).__name__}."
+            )
+
+        queries: List[str] = []
+        for i, item in enumerate(data):
+            if not isinstance(item, dict):
+                raise ValueError(
+                    f"Query #{i} must be an object with 'tool_description'."
+                )
+            desc = item.get("tool_description")
+            if not isinstance(desc, str) or not desc.strip():
+                raise ValueError(
+                    f"Query #{i} is missing a non-empty 'tool_description'."
+                )
+            queries.append(desc)
+
+        self.logger.debug(f"Loaded {len(queries)} queries.")
+        return queries
+
+    def _run_search(self, queries: List[str], db_path: Path):
+        searcher = SemanticSearcher(
+            persist_dir=db_path,
+            encoder_model=self.encoder_model,
+            cross_encoder_model=self.cross_encoder_model,
+        )
+        return searcher.batch_search(queries)
+
+    def _clone_repositories(
+        self,
+        repo_urls: Iterable[str],
+        python_exec: Optional[Path],
+    ) -> List[Tuple[str, str, str]]:
+        """
+        Clone each repo into the workspace via the shared bare-repo cache.
+
+        RepoLoader now populates the cache itself on miss, so the previous
+        two-step (cache.populate_many + loader.process) is collapsed into
+        one pass. Returns the loader's failures list -- the orchestrator
+        uses this to warn the user about repos that didn't make it in.
+        """
+        repo_urls = list(repo_urls)
+        cache = RepoCache()
+
+        cached_count = sum(1 for u in repo_urls if cache.is_cached(u))
+        to_fetch     = len(repo_urls) - cached_count
+        self.logger.info(
+            f"Cloning {len(repo_urls)} repo(s): "
+            f"{cached_count} from cache, {to_fetch} to fetch"
+        )
+
+        loader = RepoLoader(
+            self.tools_dir,
+            install=self.install_requirements,
+            python_exec=python_exec,
+            cache=cache,
+        )
+        return loader.process(repo_urls)
 
 
 ================================================
@@ -342,14 +878,401 @@ FILE: builder/__init__.py
 ================================================
 FILE: builder/mcp_builder.py
 ================================================
-Error reading file with 'cp1252': 'charmap' codec can't decode byte 0x8f in position 5186: character maps to <undefined>
+import os
+import io
+import ast
+import logging
+from pathlib import Path
+from typing import Optional, List, Tuple
+
+from .parser import ToolParser
+
+logger = logging.getLogger("ToolStorePy")
+
+
+class MCPBuilder:
+
+    def __init__(
+        self,
+        tools_dir: Path,
+        output_file: Path,
+        env_keys: Optional[List[str]] = None,
+        skipped_repos: Optional[List[str]] = None,
+        server_name: str = "UtilityTools",
+        transport: str = "streamable-http",
+        verbose: bool = False,
+    ):
+        self.tools_dir     = Path(tools_dir)
+        self.output_file   = Path(output_file)
+        self.env_keys      = env_keys or []
+        self.skipped_repos = set(skipped_repos or [])
+        self.server_name   = server_name
+        self.transport     = transport
+
+    # ==================================================
+    # PUBLIC ENTRYPOINT
+    # ==================================================
+
+    def build(self):
+        allowed_dirs = [
+            d for d in self.tools_dir.iterdir()
+            if d.is_dir()
+            and d.name not in self.skipped_repos
+            and not d.name.startswith(".")
+        ]
+
+        parser = ToolParser(self.tools_dir, allowed_dirs=allowed_dirs)
+        parsed = parser.parse_all()
+
+        self._log_conflicts(parsed["conflicts"])
+
+        if not parsed["tools"]:
+            logger.warning(
+                "[BUILD] No @tool functions were found in any repo. "
+                "The generated server will not expose any tools."
+            )
+
+        future_imports, other_imports = self._build_import_lines(parsed["imports"])
+        utilities = parsed["utilities"]
+        tools     = [t["source"] for t in parsed["tools"]]
+
+        self._write_output(
+            future_imports=future_imports,
+            imports=other_imports,
+            utilities=utilities,
+            tools=tools,
+            conflicts=parsed["conflicts"],
+        )
+
+    # ==================================================
+    # CONFLICT LOGGING
+    # ==================================================
+
+    def _log_conflicts(self, conflicts: dict):
+        for original, renamed, fpath in conflicts.get("duplicate_tools", []):
+            logger.warning(
+                f"[BUILD] @tool '{original}' appears in multiple repos -- "
+                f"renamed to '{renamed}' (from {fpath})"
+            )
+
+        for original, renamed, fpath in conflicts.get("duplicate_helpers", []):
+            logger.warning(
+                f"[BUILD] Helper function '{original}' collision -- "
+                f"renamed to '{renamed}' (from {fpath})"
+            )
+
+        for original, renamed, fpath in conflicts.get("duplicate_globals", []):
+            logger.warning(
+                f"[BUILD] Global variable '{original}' collision -- "
+                f"renamed to '{renamed}' (from {fpath})"
+            )
+
+        for original, renamed, fpath in conflicts.get("duplicate_classes", []):
+            logger.warning(
+                f"[BUILD] Class '{original}' collision -- "
+                f"renamed to '{renamed}' (from {fpath})"
+            )
+
+        for src in conflicts.get("relative_imports", []):
+            logger.warning(
+                f"[BUILD] Relative import dropped (not resolvable outside repo): "
+                f"{src.strip()}"
+            )
+
+        for src in conflicts.get("star_imports", []):
+            logger.warning(
+                f"[BUILD] Star import kept verbatim -- may cause name pollution: "
+                f"{src.strip()}"
+            )
+
+        for mod, kept, dropped, fpath in conflicts.get("alias_conflicts", []):
+            logger.warning(
+                f"[BUILD] Import alias conflict for '{mod}': "
+                f"keeping alias '{kept}', dropping '{dropped}' (from {fpath})"
+            )
+
+        for repo in conflicts.get("empty_repos", []):
+            logger.warning(
+                f"[BUILD] Repo '{repo}' contributed no @tool functions -- "
+                f"it will not appear in the generated server."
+            )
+
+        for tool_name, symbol, fpath in conflicts.get("tools_with_missing_helpers", []):
+            logger.warning(
+                f"[BUILD] @tool '{tool_name}' references '{symbol}' which came from "
+                f"a relative import that was dropped. This tool may fail at runtime. "
+                f"(file: {fpath})"
+            )
+
+        for cls_name, method_name, fpath in conflicts.get("tool_methods_skipped", []):
+            logger.warning(
+                f"[BUILD] @tool method '{cls_name}.{method_name}' was not extracted "
+                f"as a standalone tool (it lives inside a class). "
+                f"(file: {fpath})"
+            )
+
+        for fpath, error in conflicts.get("unparseable_files", []):
+            logger.warning(
+                f"[BUILD] File could not be parsed and was skipped: {fpath} ({error})"
+            )
+
+        for fpath in conflicts.get("decoding_replacements", []):
+            logger.warning(
+                f"[BUILD] File contained non-UTF-8 bytes; replacement characters "
+                f"were inserted (extracted code may be subtly wrong): {fpath}"
+            )
+
+    # ==================================================
+    # IMPORT BUILDING
+    # ==================================================
+
+    def _build_import_lines(
+        self, structured_imports: dict
+    ) -> Tuple[List[str], List[str]]:
+        """
+        Returns (future_imports, other_imports).
+        `__future__` imports must be emitted before any other code.
+        """
+        future_lines: set = set()
+        other_lines:  set = set()
+
+        for item in structured_imports["import"]:
+            if item["alias"]:
+                other_lines.add(f"import {item['module']} as {item['alias']}")
+            else:
+                other_lines.add(f"import {item['module']}")
+
+        for item in structured_imports["from"]:
+            if item["name"] == "*":
+                line = f"from {item['module']} import *"
+            elif item["alias"]:
+                line = (
+                    f"from {item['module']} import "
+                    f"{item['name']} as {item['alias']}"
+                )
+            else:
+                line = f"from {item['module']} import {item['name']}"
+
+            if item["module"] == "__future__":
+                future_lines.add(line)
+            else:
+                other_lines.add(line)
+
+        return sorted(future_lines), sorted(other_lines)
+
+    # ==================================================
+    # COMMENT BLOCKS
+    # ==================================================
+
+    def _build_env_comment_block(self) -> str:
+        if not self.env_keys:
+            return ""
+        lines = [
+            "# " + "=" * 58,
+            "# REQUIRED ENVIRONMENT VARIABLES",
+            "# " + "=" * 58,
+            "# One or more tools in this server require secrets.",
+            "# Copy workspace/.env.example -> workspace/.env and fill",
+            "# in the values before running this server.",
+            "#",
+            "# Required keys:",
+        ]
+        for key in self.env_keys:
+            lines.append(f"#   - {key}")
+        lines.append("# " + "=" * 58)
+        return "\n".join(lines) + "\n"
+
+    def _build_skipped_comment_block(self) -> str:
+        if not self.skipped_repos:
+            return ""
+        lines = [
+            "# " + "=" * 58,
+            "# REPOS EXCLUDED DUE TO HIGH SECURITY FINDINGS",
+            "# " + "=" * 58,
+            "# The following repos were skipped at your request",
+            "# after the pre-build security scan:",
+            "#",
+        ]
+        for repo in sorted(self.skipped_repos):
+            lines.append(f"#   - {repo}")
+        lines.append("# " + "=" * 58)
+        return "\n".join(lines) + "\n"
+
+    def _build_conflicts_comment_block(self, conflicts: dict) -> str:
+        sections: List[str] = []
+
+        if conflicts.get("duplicate_tools"):
+            sections.append("# @tool renames (duplicate tool names across repos):")
+            for orig, new, fpath in conflicts["duplicate_tools"]:
+                sections.append(f"#   {orig!r} -> {new!r}  ({Path(fpath).name})")
+
+        if conflicts.get("duplicate_helpers"):
+            sections.append("# Helper function renames (collision across repos):")
+            for orig, new, fpath in conflicts["duplicate_helpers"]:
+                sections.append(f"#   {orig!r} -> {new!r}  ({Path(fpath).name})")
+
+        if conflicts.get("duplicate_globals"):
+            sections.append("# Global variable renames (collision across repos):")
+            for orig, new, fpath in conflicts["duplicate_globals"]:
+                sections.append(f"#   {orig!r} -> {new!r}  ({Path(fpath).name})")
+
+        if conflicts.get("duplicate_classes"):
+            sections.append("# Class renames (collision across repos):")
+            for orig, new, fpath in conflicts["duplicate_classes"]:
+                sections.append(f"#   {orig!r} -> {new!r}  ({Path(fpath).name})")
+
+        if conflicts.get("relative_imports"):
+            sections.append(
+                "# Relative imports dropped (cannot be resolved outside their repo):"
+            )
+            for src in conflicts["relative_imports"]:
+                sections.append(f"#   {src.strip()}")
+
+        if conflicts.get("star_imports"):
+            sections.append("# Star imports kept verbatim (review for name pollution):")
+            for src in conflicts["star_imports"]:
+                sections.append(f"#   {src.strip()}")
+
+        if conflicts.get("alias_conflicts"):
+            sections.append("# Import alias conflicts (first alias kept):")
+            for mod, kept, dropped, fpath in conflicts["alias_conflicts"]:
+                sections.append(
+                    f"#   {mod!r}: kept alias {kept!r}, dropped {dropped!r}"
+                    f"  ({Path(fpath).name})"
+                )
+
+        if conflicts.get("empty_repos"):
+            sections.append("# Repos that contributed no @tool functions:")
+            for repo in conflicts["empty_repos"]:
+                sections.append(f"#   {repo}")
+
+        if conflicts.get("tools_with_missing_helpers"):
+            sections.append(
+                "# WARNING: tools referencing symbols from dropped relative imports "
+                "(may fail at runtime):"
+            )
+            for tool_name, sym, fpath in conflicts["tools_with_missing_helpers"]:
+                sections.append(
+                    f"#   @tool {tool_name!r} references {sym!r}"
+                    f"  ({Path(fpath).name})"
+                )
+
+        if conflicts.get("tool_methods_skipped"):
+            sections.append(
+                "# @tool methods inside classes (not extracted as standalone tools):"
+            )
+            for cls_name, method_name, fpath in conflicts["tool_methods_skipped"]:
+                sections.append(
+                    f"#   {cls_name}.{method_name}  ({Path(fpath).name})"
+                )
+
+        if conflicts.get("unparseable_files"):
+            sections.append("# Files that failed to parse and were skipped:")
+            for fpath, error in conflicts["unparseable_files"]:
+                sections.append(f"#   {Path(fpath).name}  ({error})")
+
+        if conflicts.get("decoding_replacements"):
+            sections.append(
+                "# Files with non-UTF-8 bytes (replaced with U+FFFD; "
+                "extracted code may be subtly wrong):"
+            )
+            for fpath in conflicts["decoding_replacements"]:
+                sections.append(f"#   {Path(fpath).name}")
+
+        if not sections:
+            return ""
+
+        header = [
+            "# " + "=" * 58,
+            "# BUILD NOTES (renames and warnings)",
+            "# " + "=" * 58,
+        ]
+        footer = ["# " + "=" * 58]
+        return "\n".join(header + sections + footer) + "\n"
+
+    # ==================================================
+    # FILE WRITING
+    # ==================================================
+
+    def _write_output(self, future_imports, imports, utilities, tools, conflicts):
+        env_block       = self._build_env_comment_block()
+        skipped_block   = self._build_skipped_comment_block()
+        conflicts_block = self._build_conflicts_comment_block(conflicts)
+
+        buffer = io.StringIO()
+
+        if env_block:
+            buffer.write(env_block)
+            buffer.write("\n")
+
+        if skipped_block:
+            buffer.write(skipped_block)
+            buffer.write("\n")
+
+        if conflicts_block:
+            buffer.write(conflicts_block)
+            buffer.write("\n")
+
+        # __future__ imports must appear before any other code statement.
+        if future_imports:
+            buffer.write("\n".join(future_imports))
+            buffer.write("\n\n")
+
+        buffer.write("from mcp.server.fastmcp import FastMCP\n")
+        buffer.write(f"mcp = FastMCP({self.server_name!r})\n")
+
+        buffer.write("\n# === IMPORTS ===\n")
+        if imports:
+            buffer.write("\n".join(imports))
+        buffer.write("\n\n# === UTILITIES ===\n\n")
+
+        for util in utilities:
+            buffer.write(util.strip() + "\n\n")
+
+        buffer.write("# === MCP TOOL FUNCTIONS ===\n\n")
+
+        for tool in tools:
+            buffer.write(tool.strip() + "\n\n")
+
+        buffer.write("\n")
+        buffer.write('if __name__ == "__main__":\n')
+        buffer.write(f"    mcp.run(transport={self.transport!r})\n")
+
+        content = buffer.getvalue()
+
+        # Validate syntax before committing the write.
+        try:
+            ast.parse(content)
+        except SyntaxError as exc:
+            logger.error(
+                f"[BUILD] Generated server has a syntax error at line "
+                f"{exc.lineno}: {exc.msg}. The file will still be written "
+                f"so you can inspect it."
+            )
+
+        # Atomic write: write to a sibling .tmp file, then rename.
+        self.output_file.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = self.output_file.with_name(self.output_file.name + ".tmp")
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            os.replace(tmp_path, self.output_file)
+        except Exception:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            raise
 
 
 ================================================
 FILE: builder/parser.py
 ================================================
 import os
+import io
+import re
 import ast
+import tokenize
 import logging
 from pathlib import Path
 from typing import Dict, List, Set, Optional, Tuple
@@ -380,36 +1303,15 @@ class ToolParser:
     Parses Python files inside tool repositories and extracts:
 
         - Structured imports (deduplicated, with alias collision handling)
-        - Utility blocks (helper functions + global assignments, renamed on collision)
-        - @tool-decorated functions (renamed on collision)
+        - Utility blocks (helpers, classes, globals, and other top-level code)
+        - @tool-decorated functions (sync and async)
         - Conflict / warning information
+
+    Renames on collision are applied with an identifier-aware rewrite, so
+    references to a renamed symbol within the same file are also updated.
 
     Only directories listed in `allowed_dirs` are parsed.
     If `allowed_dirs` is None, all subdirectories of tools_dir are parsed.
-
-    Edge cases handled
-    ------------------
-    Import issues
-        - Relative imports: dropped but every tool function whose *source text*
-          references them is flagged so the caller can warn at build time.
-        - Duplicate plain imports (``import os`` twice): collapsed to one.
-        - Alias conflicts (``import os`` vs ``import os as operating_system``):
-          the first alias seen wins; second is recorded in conflicts.
-        - Star imports (``from module import *``): kept verbatim but recorded
-          separately so the caller can warn.
-
-    Name collisions
-        - Duplicate @tool names: second+ occurrences are renamed
-          ``<name>__<repo>`` and a conflict entry is added.
-        - Helper function collisions: same rename strategy applied to utilities.
-        - Global assignment collisions: same rename strategy (variable is
-          prefixed with the repo name).
-
-    File / repo structure issues
-        - Test, docs, examples, scripts directories are excluded.
-        - setup.py and conftest.py are excluded.
-        - if __name__ == '__main__' blocks are skipped cleanly.
-        - Repos that contribute zero @tool functions are warned about.
     """
 
     def __init__(
@@ -417,7 +1319,7 @@ class ToolParser:
         tools_dir: Path,
         allowed_dirs: Optional[List[Path]] = None,
     ):
-        self.tools_dir    = Path(tools_dir)
+        self.tools_dir = Path(tools_dir)
         self.allowed_dirs = (
             [Path(d) for d in allowed_dirs]
             if allowed_dirs is not None
@@ -429,54 +1331,43 @@ class ToolParser:
     # ==================================================
 
     def parse_all(self) -> Dict:
-        """
-        Returns
-        -------
-        {
-            "imports":   {"import": [...], "from": [...]},
-            "utilities": [source_str, ...],
-            "tools":     [{"name": str, "source": str, "file": str}, ...],
-            "conflicts": {
-                "duplicate_tools":    [(original_name, new_name, file), ...],
-                "duplicate_helpers":  [(original_name, new_name, file), ...],
-                "duplicate_globals":  [(original_name, new_name, file), ...],
-                "relative_imports":   [import_source_str, ...],
-                "star_imports":       [import_source_str, ...],
-                "alias_conflicts":    [(module, kept_alias, dropped_alias, file), ...],
-                "empty_repos":        [repo_name, ...],
-                "tools_with_missing_helpers": [(tool_name, missing_symbol, file), ...],
-            },
-        }
-        """
         structured_imports: Dict = {"import": [], "from": []}
-        utilities:  List[str]  = []
-        tools:      List[Dict] = []
+        utilities: List[str] = []
+        tools: List[Dict] = []
 
-        # Deduplication state
-        seen_tool_names:    Dict[str, str] = {}   # name -> first file
-        seen_helper_names:  Dict[str, str] = {}   # name -> first file
-        seen_global_names:  Dict[str, str] = {}   # name -> first file
-        seen_plain_imports: Dict[str, Optional[str]] = {}  # module -> alias
-        seen_from_imports:  Set[Tuple] = set()    # (module, name, alias)
+        # Cross-file first-occurrence registries (decide which file gets to
+        # keep the original name; later files have their copy renamed).
+        seen_tool_names:   Dict[str, str] = {}
+        seen_helper_names: Dict[str, str] = {}
+        seen_global_names: Dict[str, str] = {}
+        seen_class_names:  Dict[str, str] = {}
+        seen_plain_imports: Dict[str, Optional[str]] = {}
+        seen_from_imports: Set[Tuple] = set()
 
         conflicts: Dict = {
             "duplicate_tools":              [],
             "duplicate_helpers":            [],
             "duplicate_globals":            [],
+            "duplicate_classes":            [],
             "relative_imports":             [],
             "star_imports":                 [],
             "alias_conflicts":              [],
             "empty_repos":                  [],
             "tools_with_missing_helpers":   [],
+            "tool_methods_skipped":         [],
+            "unparseable_files":            [],
+            "decoding_replacements":        [],
         }
 
-        # Track which symbols each repo exports via relative imports so we can
-        # warn when a tool references one of them after stripping.
-        relative_symbols_by_file: Dict[str, Set[str]] = {}
-
+        # ------------------------------------------------------------------
+        # Read + parse every file once, keep records for two-pass processing.
+        # ------------------------------------------------------------------
+        file_records: List[Dict] = []
         for file_path in self._get_py_files():
             repo_name = file_path.relative_to(self.tools_dir).parts[0]
-            code = self._read_code(file_path)
+            code, had_replacement = self._read_code(file_path)
+            if had_replacement:
+                conflicts["decoding_replacements"].append(str(file_path))
 
             try:
                 tree = ast.parse(code)
@@ -484,37 +1375,134 @@ class ToolParser:
                 logger.warning(
                     f"[PARSER] Skipping unparseable file {file_path}: {exc}"
                 )
+                conflicts["unparseable_files"].append((str(file_path), str(exc)))
                 continue
 
-            rel_symbols_this_file: Set[str] = set()
+            file_records.append({
+                "path":             file_path,
+                "repo":             repo_name,
+                "code":             code,
+                "tree":             tree,
+                "rename_map":       {},     # original_name -> new_name (this file's scope)
+                "relative_symbols": set(),
+            })
+
+        # ------------------------------------------------------------------
+        # PASS 1 - detect duplicates and build per-file rename maps.
+        # ------------------------------------------------------------------
+        for record in file_records:
+            file_path = record["path"]
+            repo_name = record["repo"]
+            tree      = record["tree"]
+            rename_map = record["rename_map"]
 
             for node in tree.body:
-
-                # ------------------------------------------------
-                # Skip __main__ guards entirely
-                # ------------------------------------------------
                 if self._is_main_guard(node):
                     continue
 
-                # ------------------------------------------------
-                # IMPORTS
-                # ------------------------------------------------
+                # Functions (sync or async)
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    name = node.name
+                    if self._is_tool_function(node):
+                        if name in seen_tool_names:
+                            new_name = f"{name}__{repo_name}"
+                            rename_map[name] = new_name
+                            conflicts["duplicate_tools"].append(
+                                (name, new_name, str(file_path))
+                            )
+                            logger.warning(
+                                f"[PARSER] Duplicate @tool '{name}' in "
+                                f"{file_path} -- renamed to '{new_name}'"
+                            )
+                        else:
+                            seen_tool_names[name] = str(file_path)
+                    else:
+                        if name in seen_helper_names:
+                            new_name = f"{name}__{repo_name}"
+                            rename_map[name] = new_name
+                            conflicts["duplicate_helpers"].append(
+                                (name, new_name, str(file_path))
+                            )
+                            logger.warning(
+                                f"[PARSER] Duplicate helper '{name}' in "
+                                f"{file_path} -- renamed to '{new_name}'"
+                            )
+                        else:
+                            seen_helper_names[name] = str(file_path)
 
+                # Classes
+                elif isinstance(node, ast.ClassDef):
+                    name = node.name
+                    if name in seen_class_names:
+                        new_name = f"{name}__{repo_name}"
+                        rename_map[name] = new_name
+                        conflicts["duplicate_classes"].append(
+                            (name, new_name, str(file_path))
+                        )
+                        logger.warning(
+                            f"[PARSER] Duplicate class '{name}' in "
+                            f"{file_path} -- renamed to '{new_name}'"
+                        )
+                    else:
+                        seen_class_names[name] = str(file_path)
+
+                    # Warn about @tool methods inside the class body -- they
+                    # are not extracted as standalone tools.
+                    for child in node.body:
+                        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+                                and self._is_tool_function(child):
+                            conflicts["tool_methods_skipped"].append(
+                                (node.name, child.name, str(file_path))
+                            )
+                            logger.warning(
+                                f"[PARSER] @tool method '{child.name}' in class "
+                                f"'{node.name}' ({file_path}) was not extracted "
+                                f"as a standalone tool."
+                            )
+
+                # Globals (Assign + AnnAssign)
+                elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+                    if self._is_fastmcp_assignment(node):
+                        continue
+                    for var_name in self._extract_assigned_names(node):
+                        if var_name in seen_global_names:
+                            new_name = f"{var_name}__{repo_name}"
+                            rename_map[var_name] = new_name
+                            conflicts["duplicate_globals"].append(
+                                (var_name, new_name, str(file_path))
+                            )
+                            logger.warning(
+                                f"[PARSER] Duplicate global '{var_name}' in "
+                                f"{file_path} -- renamed to '{new_name}'"
+                            )
+                        else:
+                            seen_global_names[var_name] = str(file_path)
+
+        # ------------------------------------------------------------------
+        # PASS 2 - extract blocks, apply per-file rename maps to references.
+        # ------------------------------------------------------------------
+        for record in file_records:
+            file_path  = record["path"]
+            code       = record["code"]
+            tree       = record["tree"]
+            rename_map = record["rename_map"]
+
+            for node in tree.body:
+                if self._is_main_guard(node):
+                    continue
+
+                # ---- IMPORTS ----------------------------------------------
                 if isinstance(node, ast.Import):
                     for alias in node.names:
-                        mod   = alias.name
+                        mod = alias.name
                         alias_name = alias.asname
-
                         if mod in seen_plain_imports:
                             existing_alias = seen_plain_imports[mod]
                             if existing_alias != alias_name:
-                                # Alias conflict â€” keep first, record second
                                 conflicts["alias_conflicts"].append(
                                     (mod, existing_alias, alias_name, str(file_path))
                                 )
-                            # Either way â€” skip, already recorded
                             continue
-
                         seen_plain_imports[mod] = alias_name
                         structured_imports["import"].append({
                             "module": mod,
@@ -522,26 +1510,23 @@ class ToolParser:
                         })
 
                 elif isinstance(node, ast.ImportFrom):
-                    # Relative import â€” drop but record
+                    # Relative import -- drop but record
                     if node.level and node.level > 0:
                         src = ast.get_source_segment(code, node) or ""
                         conflicts["relative_imports"].append(src)
-                        # Track what names this relative import would have provided
                         for alias in node.names:
-                            rel_symbols_this_file.add(alias.asname or alias.name)
+                            record["relative_symbols"].add(
+                                alias.asname or alias.name
+                            )
                         continue
 
                     mod = node.module or ""
-
                     for alias in node.names:
-                        name       = alias.name
+                        name = alias.name
                         alias_name = alias.asname
-
-                        # Star import
                         if name == "*":
                             src = ast.get_source_segment(code, node) or ""
                             conflicts["star_imports"].append(src)
-                            # Keep it â€” we can't know what it provides
                             key = (mod, "*", None)
                             if key not in seen_from_imports:
                                 seen_from_imports.add(key)
@@ -562,126 +1547,74 @@ class ToolParser:
                             "alias":  alias_name,
                         })
 
-                # ------------------------------------------------
-                # TOOL FUNCTIONS
-                # ------------------------------------------------
+                # ---- FUNCTIONS (sync + async) ----------------------------
+                elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    source    = self._extract_function_with_decorators(node, code)
+                    rewritten = self._apply_rename_map(source, rename_map)
 
-                elif isinstance(node, ast.FunctionDef):
                     if self._is_tool_function(node):
-                        original_name = node.name
-                        final_name    = original_name
-
-                        if original_name in seen_tool_names:
-                            # Rename: original__reponame
-                            final_name = f"{original_name}__{repo_name}"
-                            conflicts["duplicate_tools"].append(
-                                (original_name, final_name, str(file_path))
-                            )
-                            logger.warning(
-                                f"[PARSER] Duplicate @tool '{original_name}' in "
-                                f"{file_path} â€” renamed to '{final_name}'"
-                            )
-                        else:
-                            seen_tool_names[original_name] = str(file_path)
-
-                        source = self._extract_function_with_decorators(node, code)
-                        if original_name != final_name:
-                            source = self._rename_function(source, original_name, final_name)
-
+                        final_name = rename_map.get(node.name, node.name)
                         tools.append({
                             "name":   final_name,
-                            "source": source,
+                            "source": rewritten,
                             "file":   str(file_path),
                         })
-
-                    # Non-tool helper function
                     else:
-                        original_name = node.name
-                        final_name    = original_name
+                        utilities.append(rewritten)
 
-                        if original_name in seen_helper_names:
-                            final_name = f"{original_name}__{repo_name}"
-                            conflicts["duplicate_helpers"].append(
-                                (original_name, final_name, str(file_path))
-                            )
-                            logger.warning(
-                                f"[PARSER] Duplicate helper '{original_name}' in "
-                                f"{file_path} â€” renamed to '{final_name}'"
-                            )
-                        else:
-                            seen_helper_names[original_name] = str(file_path)
-
-                        block = ast.get_source_segment(code, node)
-                        if block:
-                            if original_name != final_name:
-                                block = self._rename_function(block, original_name, final_name)
-                            utilities.append(block)
-
-                # ------------------------------------------------
-                # CLASSES
-                # ------------------------------------------------
-
+                # ---- CLASSES ---------------------------------------------
                 elif isinstance(node, ast.ClassDef):
-                    block = ast.get_source_segment(code, node)
-                    if block:
-                        utilities.append(block)
+                    source = self._extract_class_with_decorators(node, code)
+                    if source:
+                        utilities.append(self._apply_rename_map(source, rename_map))
 
-                # ------------------------------------------------
-                # GLOBAL ASSIGNMENTS
-                # ------------------------------------------------
-
-                elif isinstance(node, ast.Assign):
-                    src = ast.get_source_segment(code, node) or ""
-                    if "FastMCP" in src:
+                # ---- GLOBAL ASSIGNMENTS ----------------------------------
+                elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+                    if self._is_fastmcp_assignment(node):
                         continue
+                    src = ast.get_source_segment(code, node) or ""
+                    if src:
+                        utilities.append(self._apply_rename_map(src, rename_map))
 
-                    # Try to detect simple name assignments for collision checking
-                    assigned_names = self._extract_assigned_names(node)
+                # ---- OTHER MODULE-LEVEL CODE (preserve) ------------------
+                elif isinstance(node, (
+                    ast.Try, ast.With, ast.AsyncWith,
+                    ast.For, ast.AsyncFor, ast.While, ast.If,
+                    ast.Expr, ast.Raise, ast.Delete,
+                    ast.Global, ast.Nonlocal,
+                )):
+                    src = ast.get_source_segment(code, node)
+                    if src:
+                        utilities.append(self._apply_rename_map(src, rename_map))
 
-                    renamed = False
-                    for var_name in assigned_names:
-                        if var_name in seen_global_names:
-                            new_name = f"{var_name}__{repo_name}"
-                            conflicts["duplicate_globals"].append(
-                                (var_name, new_name, str(file_path))
-                            )
-                            logger.warning(
-                                f"[PARSER] Duplicate global '{var_name}' in "
-                                f"{file_path} â€” renamed to '{new_name}'"
-                            )
-                            src = src.replace(var_name, new_name, 1)
-                            renamed = True
-                        else:
-                            seen_global_names[var_name] = str(file_path)
-
-                    utilities.append(src)
-
-            # Record relative symbols for this file
-            if rel_symbols_this_file:
-                relative_symbols_by_file[str(file_path)] = rel_symbols_this_file
-
-        # ------------------------------------------------
-        # Post-pass: warn about tools referencing dropped relative symbols
-        # ------------------------------------------------
-        all_relative_symbols = set().union(*relative_symbols_by_file.values()) if relative_symbols_by_file else set()
-        if all_relative_symbols:
+        # ------------------------------------------------------------------
+        # Post-pass: per-file, identifier-aware check for tools referencing
+        # symbols that came in via dropped relative imports.
+        # ------------------------------------------------------------------
+        for record in file_records:
+            rel_symbols = record["relative_symbols"]
+            if not rel_symbols:
+                continue
+            file_str = str(record["path"])
             for tool in tools:
-                for sym in all_relative_symbols:
-                    if sym in tool["source"]:
+                if tool["file"] != file_str:
+                    continue
+                tool_idents = self._extract_identifiers(tool["source"])
+                for sym in rel_symbols:
+                    if sym in tool_idents:
                         conflicts["tools_with_missing_helpers"].append(
                             (tool["name"], sym, tool["file"])
                         )
 
-        # ------------------------------------------------
-        # Warn about repos with no tools
-        # ------------------------------------------------
+        # ------------------------------------------------------------------
+        # Warn about repos with no tools.
+        # ------------------------------------------------------------------
         repos_with_tools: Set[str] = set()
         for tool in tools:
             repo = Path(tool["file"]).relative_to(self.tools_dir).parts[0]
             repos_with_tools.add(repo)
 
-        search_roots = self._get_search_roots()
-        for root_dir in search_roots:
+        for root_dir in self._get_search_roots():
             if root_dir.name not in repos_with_tools:
                 conflicts["empty_repos"].append(root_dir.name)
                 logger.warning(
@@ -705,45 +1638,44 @@ class ToolParser:
         return [d for d in self.tools_dir.iterdir() if d.is_dir()]
 
     def _get_py_files(self) -> List[Path]:
-        """
-        Yield .py files from allowed_dirs only, excluding:
-          - known non-code directories (tests, docs, examples, â€¦)
-          - known non-tool top-level files (setup.py, conftest.py)
-        """
         py_files = []
         for root_dir in self._get_search_roots():
             for root, dirs, files in os.walk(root_dir):
                 root_path = Path(root)
-
-                # Prune excluded directories in-place so os.walk won't descend
-                dirs[:] = [
-                    d for d in dirs
-                    if d.lower() not in _EXCLUDED_DIRS
-                ]
-
+                dirs[:] = [d for d in dirs if d.lower() not in _EXCLUDED_DIRS]
                 for fname in files:
                     if not fname.endswith(".py"):
                         continue
-
-                    # Exclude known non-tool files only at the repo root level
                     if root_path == root_dir and fname in _EXCLUDED_FILES:
-                        logger.debug(f"[PARSER] Skipping excluded file: {root_path / fname}")
+                        logger.debug(
+                            f"[PARSER] Skipping excluded file: {root_path / fname}"
+                        )
                         continue
-
                     py_files.append(root_path / fname)
-
         return py_files
 
-    def _read_code(self, file_path: Path) -> str:
-        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-            return f.read()
+    def _read_code(self, file_path: Path) -> Tuple[str, bool]:
+        """
+        Read source as UTF-8. If invalid bytes are present, decode with
+        replacement and return had_replacement=True so the caller can warn.
+        """
+        with open(file_path, "rb") as f:
+            raw = f.read()
+        try:
+            return raw.decode("utf-8"), False
+        except UnicodeDecodeError:
+            decoded = raw.decode("utf-8", errors="replace")
+            logger.warning(
+                f"[PARSER] Non-UTF-8 bytes in {file_path}; replaced with U+FFFD "
+                f"(extracted code may be subtly wrong)."
+            )
+            return decoded, True
 
     # ==================================================
     # NODE CLASSIFICATION
     # ==================================================
 
     def _is_main_guard(self, node: ast.stmt) -> bool:
-        """Return True for `if __name__ == '__main__':` blocks."""
         if not isinstance(node, ast.If):
             return False
         test = node.test
@@ -758,7 +1690,7 @@ class ToolParser:
         comp = test.comparators[0]
         return isinstance(comp, ast.Constant) and comp.value == "__main__"
 
-    def _is_tool_function(self, node: ast.FunctionDef) -> bool:
+    def _is_tool_function(self, node) -> bool:
         for decorator in node.decorator_list:
             if isinstance(decorator, ast.Name) and decorator.id == "tool":
                 return True
@@ -771,46 +1703,125 @@ class ToolParser:
                     return True
         return False
 
-    # ==================================================
-    # SOURCE EXTRACTION & REWRITING
-    # ==================================================
-
-    def _extract_function_with_decorators(self, node: ast.FunctionDef, code: str) -> str:
-        lines      = code.split("\n")
-        start_line = node.lineno - 1
-        decorators = []
-        idx        = start_line - 1
-
-        while idx >= 0 and lines[idx].strip().startswith("@"):
-            decorators.append(lines[idx])
-            idx -= 1
-
-        decorators.reverse()
-        func_block = decorators + lines[start_line:node.end_lineno]
-        return "\n".join(func_block)
-
-    def _rename_function(self, source: str, old_name: str, new_name: str) -> str:
+    def _is_fastmcp_assignment(self, node) -> bool:
         """
-        Replace the function definition name only (not arbitrary occurrences of
-        the string).  Handles both `def foo(` and `async def foo(`.
+        AST-level check: is this assignment's RHS a call to FastMCP(...)?
+        Replaces the old `"FastMCP" in src` substring check.
         """
-        import re
-        # Match `def <old_name>(` with word boundary to avoid partial matches
-        pattern = rf'\bdef\s+{re.escape(old_name)}\s*\('
-        replacement = f"def {new_name}("
-        return re.sub(pattern, replacement, source, count=1)
+        value = getattr(node, "value", None)
+        if value is None or not isinstance(value, ast.Call):
+            return False
+        func = value.func
+        if isinstance(func, ast.Name) and func.id == "FastMCP":
+            return True
+        if isinstance(func, ast.Attribute) and func.attr == "FastMCP":
+            return True
+        return False
 
-    def _extract_assigned_names(self, node: ast.Assign) -> List[str]:
+    # ==================================================
+    # SOURCE EXTRACTION
+    # ==================================================
+
+    def _extract_function_with_decorators(self, node, code: str) -> str:
+        """
+        Extract a function (sync or async) including all decorators.
+        Uses decorator_list[0].lineno when present so multi-line decorators
+        are captured correctly.
+        """
+        lines = code.split("\n")
+        if node.decorator_list:
+            start_line = node.decorator_list[0].lineno - 1
+        else:
+            start_line = node.lineno - 1
+        return "\n".join(lines[start_line:node.end_lineno])
+
+    def _extract_class_with_decorators(self, node: ast.ClassDef, code: str) -> str:
+        """Same approach for classes, which can also be decorated."""
+        lines = code.split("\n")
+        if node.decorator_list:
+            start_line = node.decorator_list[0].lineno - 1
+        else:
+            start_line = node.lineno - 1
+        return "\n".join(lines[start_line:node.end_lineno])
+
+    def _extract_assigned_names(self, node) -> List[str]:
         """
         Return simple variable names from an assignment's targets.
-        Only handles Name targets (not tuple unpacking, attribute sets, etc.)
+        Handles ast.Assign (incl. tuple unpacking of plain names) and
+        ast.AnnAssign.
         """
-        names = []
-        for target in node.targets:
-            if isinstance(target, ast.Name):
-                names.append(target.id)
+        names: List[str] = []
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    names.append(target.id)
+                elif isinstance(target, (ast.Tuple, ast.List)):
+                    for elt in target.elts:
+                        if isinstance(elt, ast.Name):
+                            names.append(elt.id)
+        elif isinstance(node, ast.AnnAssign):
+            if isinstance(node.target, ast.Name):
+                names.append(node.target.id)
         return names
 
+    # ==================================================
+    # IDENTIFIER-AWARE REWRITING
+    # ==================================================
+
+    def _apply_rename_map(self, source: str, rename_map: Dict[str, str]) -> str:
+        """
+        Rewrite identifier references using tokenize so only NAME tokens are
+        affected -- strings and comments are left alone. Rewrites every
+        occurrence in the block (def site AND call sites), which is what
+        keeps renamed helpers/globals callable after extraction.
+        """
+        if not rename_map:
+            return source
+
+        try:
+            tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
+        except tokenize.TokenizeError:
+            return self._apply_rename_map_regex(source, rename_map)
+
+        # Build a character-offset table so we can splice the original string
+        # without relying on tokenize.untokenize's whitespace reconstruction.
+        lines = source.splitlines(keepends=True)
+        line_starts = [0]
+        for ln in lines:
+            line_starts.append(line_starts[-1] + len(ln))
+
+        def pos_to_offset(row: int, col: int) -> int:
+            # tokenize rows are 1-indexed; cols are 0-indexed
+            if row - 1 >= len(line_starts):
+                return len(source)
+            return line_starts[row - 1] + col
+
+        substitutions: List[Tuple[int, int, str]] = []
+        for tok in tokens:
+            if tok.type == tokenize.NAME and tok.string in rename_map:
+                start = pos_to_offset(tok.start[0], tok.start[1])
+                end   = pos_to_offset(tok.end[0],   tok.end[1])
+                substitutions.append((start, end, rename_map[tok.string]))
+
+        # Apply in reverse so earlier offsets stay valid.
+        result = source
+        for start, end, new_str in reversed(substitutions):
+            result = result[:start] + new_str + result[end:]
+        return result
+
+    def _apply_rename_map_regex(self, source: str, rename_map: Dict[str, str]) -> str:
+        """Fallback: word-boundary regex replace if tokenize fails."""
+        for old, new in rename_map.items():
+            source = re.sub(rf'\b{re.escape(old)}\b', new, source)
+        return source
+
+    def _extract_identifiers(self, source: str) -> Set[str]:
+        """Identifier-aware set of NAME tokens in source."""
+        try:
+            tokens = tokenize.generate_tokens(io.StringIO(source).readline)
+            return {tok.string for tok in tokens if tok.type == tokenize.NAME}
+        except tokenize.TokenizeError:
+            return set(re.findall(r'\b[A-Za-z_]\w*\b', source))
 
 
 ================================================
@@ -826,21 +1837,46 @@ import shutil
 import zipfile
 import tarfile
 import hashlib
+import tempfile
+import logging
 import requests
 from pathlib import Path
+from typing import Optional
+from urllib.parse import urlparse
+
+logger = logging.getLogger("ToolStorePy")
+
+
+# (connect_timeout, read_timeout) in seconds.
+DEFAULT_TIMEOUT = (10, 60)
+
+# Cap downloads to a sane size to prevent disk-filling attacks.
+DEFAULT_MAX_DOWNLOAD_BYTES = 500 * 1024 * 1024  # 500 MB
 
 
 class IndexDownloader:
     """
-    Handles downloading and extracting vector DB archives.
+    Downloads and extracts vector DB archives with:
+
+      - Atomic file/directory writes (no partial downloads/extractions left
+        in the cache to be reused as if they were complete).
+      - Path-traversal protection on every archive member (zip-slip and tar
+        link escapes), with content-based archive-type detection so a file
+        renamed to .zip cannot be silently treated as a tarball.
+      - Optional SHA-256 integrity verification.
+      - Download size cap and request timeouts.
     """
 
-    def __init__(self, index_root: Path):
-        """
-        index_root: Path to workspace/index_db
-        """
-        self.index_root = Path(index_root)
-        self.archives_dir = self.index_root / "archives"
+    def __init__(
+        self,
+        index_root: Path,
+        timeout: tuple = DEFAULT_TIMEOUT,
+        max_download_bytes: int = DEFAULT_MAX_DOWNLOAD_BYTES,
+    ):
+        self.index_root         = Path(index_root)
+        self.archives_dir       = self.index_root / "archives"
+        self.timeout            = timeout
+        self.max_download_bytes = max_download_bytes
 
         self.index_root.mkdir(parents=True, exist_ok=True)
         self.archives_dir.mkdir(parents=True, exist_ok=True)
@@ -849,90 +1885,269 @@ class IndexDownloader:
     # Public API
     # ------------------------------------------------------------------
 
-    def download(self, url: str, force_refresh: bool = False) -> Path:
+    def download(
+        self,
+        url: str,
+        force_refresh: bool = False,
+        sha256: Optional[str] = None,
+    ) -> Path:
         """
-        Downloads and prepares an index from URL.
+        Download and prepare an index from a URL.
+
+        Args:
+            url:           Archive URL.
+            force_refresh: Re-download even if a cached copy exists.
+            sha256:        Optional hex-encoded SHA-256 of the expected
+                           archive. If provided, the download is verified
+                           and rejected on mismatch.
 
         Returns:
-            Path to extracted DB directory.
+            Path to the extracted DB directory.
         """
-
-        archive_path = self._download_archive(url, force_refresh)
+        archive_path = self._download_archive(url, force_refresh, sha256)
         extract_path = self._extract_archive(archive_path, force_refresh)
-
         return extract_path
 
     # ------------------------------------------------------------------
-    # Internal Methods
+    # Download
     # ------------------------------------------------------------------
 
-    def _download_archive(self, url: str, force_refresh: bool) -> Path:
-        """
-        Download archive into archives directory.
-        """
-
+    def _download_archive(
+        self,
+        url: str,
+        force_refresh: bool,
+        sha256: Optional[str],
+    ) -> Path:
         filename = self._derive_filename(url)
         archive_path = self.archives_dir / filename
+        part_path    = archive_path.with_name(archive_path.name + ".part")
+
+        # Drop any partial file left over from an interrupted previous run.
+        if part_path.exists():
+            try:
+                part_path.unlink()
+            except OSError:
+                pass
 
         if archive_path.exists() and not force_refresh:
-            return archive_path
+            if sha256 and not self._verify_sha256(archive_path, sha256):
+                logger.warning(
+                    f"[INDEX] Cached archive failed checksum -- re-downloading: "
+                    f"{archive_path.name}"
+                )
+                archive_path.unlink()
+            else:
+                return archive_path
 
-        response = requests.get(url, stream=True)
-        response.raise_for_status()
+        logger.info(f"[INDEX] Downloading {url}")
 
-        with open(archive_path, "wb") as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
+        hasher = hashlib.sha256()
+        bytes_written = 0
 
+        with requests.get(url, stream=True, timeout=self.timeout) as resp:
+            resp.raise_for_status()
+
+            # If the server reports Content-Length, enforce the cap up front.
+            content_length = resp.headers.get("Content-Length")
+            if content_length is not None:
+                try:
+                    declared = int(content_length)
+                except ValueError:
+                    declared = -1
+                if declared > self.max_download_bytes:
+                    raise ValueError(
+                        f"Archive too large: declared {declared} bytes, "
+                        f"limit {self.max_download_bytes}"
+                    )
+
+            with open(part_path, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=8192):
+                    if not chunk:
+                        continue
+                    bytes_written += len(chunk)
+                    if bytes_written > self.max_download_bytes:
+                        f.close()
+                        part_path.unlink(missing_ok=True)
+                        raise ValueError(
+                            f"Archive exceeded size cap of "
+                            f"{self.max_download_bytes} bytes"
+                        )
+                    hasher.update(chunk)
+                    f.write(chunk)
+
+        # Integrity check before committing the file to its final name.
+        if sha256:
+            actual = hasher.hexdigest()
+            if actual.lower() != sha256.lower():
+                part_path.unlink(missing_ok=True)
+                raise ValueError(
+                    f"Checksum mismatch for {url}\n"
+                    f"  expected: {sha256}\n"
+                    f"  actual:   {actual}"
+                )
+
+        # Atomic rename -- only after a complete (and verified) download.
+        part_path.replace(archive_path)
         return archive_path
 
+    # ------------------------------------------------------------------
+    # Extraction
+    # ------------------------------------------------------------------
+
     def _extract_archive(self, archive_path: Path, force_refresh: bool) -> Path:
-        """
-        Extract archive into isolated folder.
-        """
-
         folder_name = archive_path.stem
-        extract_path = self.index_root / folder_name
+        # For .tar.gz / .tar.bz2 / .tar.xz, .stem still leaves ".tar" behind.
+        if folder_name.endswith(".tar"):
+            folder_name = folder_name[:-4]
 
+        extract_path = self.index_root / folder_name
+        marker_path  = extract_path / ".extracted_ok"
+
+        # Trust an existing extract dir only if the completion marker is there.
         if extract_path.exists():
             if force_refresh:
                 shutil.rmtree(extract_path)
-            else:
+            elif marker_path.exists():
                 return extract_path
+            else:
+                logger.warning(
+                    f"[INDEX] Removing incomplete extraction: {extract_path}"
+                )
+                shutil.rmtree(extract_path)
 
-        extract_path.mkdir(parents=True, exist_ok=True)
+        # Extract to a temp dir on the same filesystem, then rename atomically.
+        tmp_extract = Path(tempfile.mkdtemp(
+            prefix=folder_name + ".",
+            suffix=".tmp",
+            dir=self.index_root,
+        ))
 
-        if archive_path.suffix == ".zip":
-            with zipfile.ZipFile(archive_path, "r") as z:
-                z.extractall(extract_path)
+        try:
+            kind = self._classify_archive(archive_path)
+            if kind == "zip":
+                self._extract_zip_safe(archive_path, tmp_extract)
+            elif kind == "tar":
+                self._extract_tar_safe(archive_path, tmp_extract)
+            else:
+                raise ValueError(
+                    f"Unsupported or unrecognised archive: {archive_path.name}"
+                )
 
-        elif archive_path.suffixes[-2:] == [".tar", ".gz"]:
-            with tarfile.open(archive_path, "r:gz") as t:
-                t.extractall(extract_path)
-
-        else:
-            raise ValueError(
-                f"Unsupported archive format: {archive_path.name}"
-            )
+            (tmp_extract / ".extracted_ok").touch()
+            tmp_extract.replace(extract_path)
+        except Exception:
+            shutil.rmtree(tmp_extract, ignore_errors=True)
+            raise
 
         return extract_path
 
-    def _derive_filename(self, url: str) -> str:
+    @staticmethod
+    def _classify_archive(archive_path: Path) -> str:
         """
-        Safely derive filename from URL.
-        If URL does not contain a clean filename,
-        fallback to hashed name.
+        Identify archive kind from on-disk content (magic bytes), not the
+        filename, so a misnamed or spoofed file fails loudly instead of
+        being misextracted.
         """
+        if zipfile.is_zipfile(archive_path):
+            return "zip"
+        if tarfile.is_tarfile(archive_path):
+            return "tar"
+        return "unknown"
 
-        name = url.split("/")[-1]
+    @staticmethod
+    def _is_within_directory(directory: Path, target: Path) -> bool:
+        directory = directory.resolve()
+        try:
+            target.resolve().relative_to(directory)
+            return True
+        except ValueError:
+            return False
 
-        if "." not in name:
-            # Fallback: use hash
-            hash_id = hashlib.sha256(url.encode()).hexdigest()[:12]
-            return f"index-{hash_id}.zip"
+    def _extract_zip_safe(self, archive_path: Path, dest: Path) -> None:
+        dest_resolved = dest.resolve()
+        with zipfile.ZipFile(archive_path, "r") as z:
+            for member in z.infolist():
+                name = member.filename
+                self._reject_unsafe_member_name(name)
+                target = (dest_resolved / name).resolve()
+                if not self._is_within_directory(dest_resolved, target):
+                    raise ValueError(f"Zip-slip attempt blocked: {name}")
+            # All members verified -- safe to extract.
+            z.extractall(dest)
 
-        return name
+    def _extract_tar_safe(self, archive_path: Path, dest: Path) -> None:
+        dest_resolved = dest.resolve()
+        # 'r:*' auto-detects gzip / bzip2 / xz transparently.
+        with tarfile.open(archive_path, mode="r:*") as t:
+            for member in t.getmembers():
+                # Reject device files, FIFOs, etc.
+                if not (member.isfile() or member.isdir()
+                        or member.issym() or member.islnk()):
+                    raise ValueError(
+                        f"Refusing tar member of unsupported type: "
+                        f"{member.name} (type={member.type!r})"
+                    )
 
+                self._reject_unsafe_member_name(member.name)
+
+                target = (dest_resolved / member.name).resolve()
+                if not self._is_within_directory(dest_resolved, target):
+                    raise ValueError(f"Tar-slip attempt blocked: {member.name}")
+
+                # Verify link targets stay inside the extract dir too.
+                if member.issym() or member.islnk():
+                    link_target = (target.parent / member.linkname).resolve()
+                    if not self._is_within_directory(dest_resolved, link_target):
+                        raise ValueError(
+                            f"Tar link escapes extract dir: "
+                            f"{member.name} -> {member.linkname}"
+                        )
+
+            # On Python >= 3.12, 'filter=\"data\"' applies the stdlib's strict
+            # extraction policy as defense-in-depth on top of our checks.
+            try:
+                t.extractall(dest, filter="data")
+            except TypeError:
+                t.extractall(dest)
+
+    @staticmethod
+    def _reject_unsafe_member_name(name: str) -> None:
+        """Block obviously hostile member names before any path resolution."""
+        if not name:
+            return
+        if name.startswith("/") or name.startswith("\\"):
+            raise ValueError(f"Refusing absolute-path archive member: {name}")
+        if "\\" in name:
+            # ZIP/TAR specify forward slashes; backslashes are a red flag.
+            raise ValueError(f"Refusing archive member with backslash: {name}")
+        if ".." in Path(name).parts:
+            raise ValueError(f"Refusing traversal archive member: {name}")
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _verify_sha256(path: Path, expected_hex: str) -> bool:
+        hasher = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                hasher.update(chunk)
+        return hasher.hexdigest().lower() == expected_hex.lower()
+
+    @staticmethod
+    def _derive_filename(url: str) -> str:
+        """
+        Derive a stable filename from a URL, ignoring query strings and
+        fragments. Falls back to a hashed name if no usable filename is
+        present in the path.
+        """
+        parsed = urlparse(url)
+        candidate = Path(parsed.path).name
+        if candidate and "." in candidate:
+            return candidate
+        hash_id = hashlib.sha256(url.encode()).hexdigest()[:12]
+        return f"index-{hash_id}.zip"
 
 
 ================================================
@@ -1000,25 +2215,64 @@ FILE: loader/__init__.py
 ================================================
 FILE: loader/cache.py
 ================================================
+import re
+import shutil
 import subprocess
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
+from urllib.parse import urlparse
 
 logger = logging.getLogger("ToolStorePy")
 
-# Default cache location â€” inside the package
+# Default cache location -- inside the package
 DEFAULT_CACHE_DIR = Path(__file__).parent.parent / ".repo_cache"
+
+
+def _derive_repo_key(url: str) -> str:
+    """
+    Derive a stable, collision-resistant folder/cache name from a git URL.
+
+    Same-named repos from different orgs no longer collide because the org
+    (and any subgroup) becomes part of the key.
+
+    Examples:
+        https://github.com/alice/tools.git  -> "alice__tools"
+        https://github.com/bob/tools.git    -> "bob__tools"
+        git@github.com:alice/tools.git      -> "alice__tools"
+        https://gitlab.com/g/sub/repo.git   -> "g__sub__repo"
+    """
+    url = url.rstrip("/")
+
+    # SSH-style: git@host:org/repo.git  (urlparse can't handle this cleanly)
+    if url.startswith("git@") and ":" in url and "://" not in url:
+        path = url.split(":", 1)[1]
+    else:
+        path = urlparse(url).path.lstrip("/")
+
+    if path.endswith(".git"):
+        path = path[:-4]
+
+    parts = [p for p in path.split("/") if p]
+    if not parts:
+        # Degenerate URL -- fall back to a hash so we still get a usable key.
+        import hashlib
+        return "repo-" + hashlib.sha256(url.encode()).hexdigest()[:12]
+
+    key = "__".join(parts)
+    # Filesystem-safe: keep alnum/underscore/dot/dash, replace anything else.
+    key = re.sub(r"[^A-Za-z0-9_.-]", "_", key)
+    return key
 
 
 class RepoCache:
     """
     Manages a local cache of bare git repositories inside the package.
-    
+
     Workflow:
-        - populate(url)  : clone from remote into cache as bare repo (once)
-        - get_path(url)  : return local bare repo path for a given remote URL
-        - clone_from_cache(url, target) : fast local clone from cache â†’ target dir
+        - populate(url)            : clone from remote into cache as bare repo (once)
+        - get_path(url)            : return local bare repo path for a given URL
+        - clone_local(url, target) : fast local clone from cache -> target dir
     """
 
     def __init__(self, cache_dir: Optional[Path] = None):
@@ -1029,9 +2283,9 @@ class RepoCache:
     # PUBLIC API
     # --------------------------------------------------
 
-    def populate(self, remote_url: str, force: bool = False):
+    def populate(self, remote_url: str, force: bool = False) -> None:
         """
-        Clone remote_url as a bare repo into cache.
+        Clone remote_url as a bare repo into the cache.
         Skips if already cached unless force=True.
         """
         bare_path = self._bare_path(remote_url)
@@ -1041,27 +2295,84 @@ class RepoCache:
             return
 
         if bare_path.exists() and force:
-            import shutil
             shutil.rmtree(bare_path)
 
-        logger.info(f"[CACHE] Caching {remote_url} â†’ {bare_path.name}")
+        logger.info(f"[CACHE] Caching {remote_url} -> {bare_path.name}")
 
-        subprocess.run(
-            ["git", "clone", "--bare", "--depth", "1", remote_url, str(bare_path)],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+        # Clone into a sibling .tmp dir, then rename atomically. A killed
+        # clone leaves a .tmp behind that gets cleaned on next call instead
+        # of being mistaken for a healthy bare repo.
+        tmp_path = bare_path.with_name(bare_path.name + ".tmp")
+        if tmp_path.exists():
+            shutil.rmtree(tmp_path, ignore_errors=True)
+
+        try:
+            subprocess.run(
+                ["git", "clone", "--bare", "--depth", "1",
+                 remote_url, str(tmp_path)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            tmp_path.replace(bare_path)
+        except subprocess.CalledProcessError:
+            shutil.rmtree(tmp_path, ignore_errors=True)
+            raise
 
         logger.info(f"[CACHE] Cached {bare_path.name}")
 
-    def populate_many(self, remote_urls: list, force: bool = False):
-        """Cache multiple repos, skipping already-cached ones."""
+    def populate_many(
+        self,
+        remote_urls: List[str],
+        force: bool = False,
+    ) -> List[str]:
+        """
+        Cache multiple repos, skipping already-cached ones.
+        Returns the list of URLs that failed.
+        """
+        failed: List[str] = []
         for url in remote_urls:
             try:
                 self.populate(url, force=force)
             except subprocess.CalledProcessError as e:
-                logger.error(f"[CACHE] Failed to cache {url}: {e.stderr}")
+                stderr = (e.stderr or "").strip()
+                logger.error(f"[CACHE] Failed to cache {url}: {stderr}")
+                failed.append(url)
+        return failed
+
+    def populate_from_local(self, remote_url: str, local_repo: Path) -> bool:
+        """
+        Populate the cache by bare-cloning an existing local working tree
+        rather than re-fetching from the remote. Used to backfill the cache
+        after a direct remote clone, so the next build is fast.
+
+        Returns True on success, False otherwise (failure is non-fatal).
+        """
+        bare_path = self._bare_path(remote_url)
+        if bare_path.exists():
+            return True
+
+        tmp_path = bare_path.with_name(bare_path.name + ".tmp")
+        if tmp_path.exists():
+            shutil.rmtree(tmp_path, ignore_errors=True)
+
+        try:
+            subprocess.run(
+                ["git", "clone", "--bare", str(local_repo), str(tmp_path)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            tmp_path.replace(bare_path)
+            logger.debug(f"[CACHE] Backfilled from local: {bare_path.name}")
+            return True
+        except subprocess.CalledProcessError as e:
+            shutil.rmtree(tmp_path, ignore_errors=True)
+            logger.warning(
+                f"[CACHE] Backfill from local failed for {remote_url}: "
+                f"{(e.stderr or '').strip()}"
+            )
+            return False
 
     def is_cached(self, remote_url: str) -> bool:
         return self._bare_path(remote_url).exists()
@@ -1072,9 +2383,10 @@ class RepoCache:
 
     def clone_local(self, remote_url: str, target: Path) -> bool:
         """
-        Clone from local bare cache into target directory.
-        Falls back to remote if not cached.
-        Returns True if cloned from cache, False if fell back to remote.
+        Clone from the local bare cache into target directory.
+        Falls back to a remote clone if not cached.
+
+        Returns True if cloned from cache, False if it fell back to remote.
         """
         bare_path = self._bare_path(remote_url)
 
@@ -1087,8 +2399,9 @@ class RepoCache:
             )
             return True
 
-        # fallback to remote
-        logger.warning(f"[CACHE] Not cached, falling back to remote: {remote_url}")
+        logger.warning(
+            f"[CACHE] Not cached, falling back to remote: {remote_url}"
+        )
         subprocess.run(
             ["git", "clone", "--depth", "1", remote_url, str(target)],
             check=True,
@@ -1097,11 +2410,13 @@ class RepoCache:
         )
         return False
 
-    def list_cached(self) -> list:
-        return [p.name for p in self.cache_dir.iterdir() if p.is_dir()]
+    def list_cached(self) -> List[str]:
+        return [
+            p.name for p in self.cache_dir.iterdir()
+            if p.is_dir() and not p.name.endswith(".tmp")
+        ]
 
-    def clear(self):
-        import shutil
+    def clear(self) -> None:
         shutil.rmtree(self.cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         logger.info("[CACHE] Cache cleared.")
@@ -1111,11 +2426,8 @@ class RepoCache:
     # --------------------------------------------------
 
     def _bare_path(self, remote_url: str) -> Path:
-        """Derive stable folder name from URL."""
-        name = remote_url.rstrip("/").split("/")[-1]
-        if name.endswith(".git"):
-            name = name[:-4]
-        return self.cache_dir / f"{name}.git"
+        """Derive stable, collision-resistant folder name from URL."""
+        return self.cache_dir / f"{_derive_repo_key(remote_url)}.git"
 
 
 ================================================
@@ -1124,13 +2436,17 @@ FILE: loader/repo.py
 import subprocess
 import logging
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Iterable, Optional, List, Tuple
+
+from .cache import _derive_repo_key
 
 
 class RepoLoader:
     """
-    Handles cloning tool repositories into workspace.
-    Uses local RepoCache when available for instant clones.
+    Clones tool repositories into the workspace, using a local RepoCache
+    when available. Individual failures do not abort the whole build:
+    successful repos still get processed, and the failed ones end up in
+    self.failures for the caller to surface.
     """
 
     def __init__(
@@ -1140,19 +2456,29 @@ class RepoLoader:
         python_exec: Optional[Path] = None,
         cache=None,   # RepoCache instance, optional
     ):
-        self.tools_dir  = Path(tools_dir)
-        self.install    = install
+        self.tools_dir   = Path(tools_dir)
+        self.install     = install
         self.python_exec = python_exec
-        self.cache      = cache
+        self.cache       = cache
         self.tools_dir.mkdir(parents=True, exist_ok=True)
         self.logger = logging.getLogger("ToolStorePy")
 
-    def process(self, repo_urls: Iterable[str]):
+        # (repo_url, folder_name, stderr) for each repo that failed to clone.
+        self.failures: List[Tuple[str, str, str]] = []
+        # (repo_path_name, stderr_tail) for each pip install that failed.
+        self.install_failures: List[Tuple[str, str]] = []
+
+    def process(self, repo_urls: Iterable[str]) -> List[Tuple[str, str, str]]:
+        """
+        Clone each URL. Returns self.failures for convenience; check it to
+        see which repos couldn't be cloned without aborting the build.
+        """
         for repo_url in repo_urls:
             self._clone_repo(repo_url)
+        return self.failures
 
-    def _clone_repo(self, repo_url: str):
-        folder_name = self._derive_folder_name(repo_url)
+    def _clone_repo(self, repo_url: str) -> None:
+        folder_name = _derive_repo_key(repo_url)
         target_path = self.tools_dir / folder_name
 
         if target_path.exists():
@@ -1162,49 +2488,84 @@ class RepoLoader:
         self.logger.info(f"[CLONE] {folder_name}")
 
         try:
-            if self.cache and self.cache.is_cached(repo_url):
-                # instant local clone from cache
+            if self.cache:
+                # If the cache doesn't have this repo yet, populate it now
+                # so future builds are fast. Fall back to direct remote
+                # clone if populating fails.
+                if not self.cache.is_cached(repo_url):
+                    try:
+                        self.cache.populate(repo_url)
+                    except subprocess.CalledProcessError as e:
+                        self.logger.warning(
+                            f"[CACHE-MISS] Could not populate cache for "
+                            f"{folder_name}; falling back to direct remote "
+                            f"clone. ({(e.stderr or '').strip()})"
+                        )
+                        self._direct_remote_clone(repo_url, target_path)
+                        # Backfill the cache from the freshly-cloned tree so
+                        # the next build still benefits from a local clone.
+                        self.cache.populate_from_local(repo_url, target_path)
+                        self._maybe_install(target_path)
+                        return
+
                 self.cache.clone_local(repo_url, target_path)
                 self.logger.info(f"[CACHE HIT] {folder_name}")
             else:
-                # remote clone
-                subprocess.run(
-                    ["git", "clone", "--depth", "1", repo_url, str(target_path)],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
-                self.logger.info(f"[REMOTE] Cloned {folder_name}")
+                self._direct_remote_clone(repo_url, target_path)
 
         except subprocess.CalledProcessError as e:
-            self.logger.error(f"[FAILED] {folder_name}: {e.stderr.strip()}")
-            raise RuntimeError(f"Git clone failed for {repo_url}")
+            stderr = (e.stderr or "").strip()
+            self.logger.error(f"[FAILED] {folder_name}: {stderr}")
+            self.failures.append((repo_url, folder_name, stderr))
+            # Clean up any partial directory git may have left behind.
+            if target_path.exists():
+                import shutil
+                shutil.rmtree(target_path, ignore_errors=True)
+            return
 
+        self._maybe_install(target_path)
+
+    def _direct_remote_clone(self, repo_url: str, target_path: Path) -> None:
+        """Shallow clone directly from the remote (no cache involvement)."""
+        subprocess.run(
+            ["git", "clone", "--depth", "1", repo_url, str(target_path)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.logger.info(f"[REMOTE] Cloned {target_path.name}")
+
+    def _maybe_install(self, target_path: Path) -> None:
         if self.install and self.python_exec:
             self._install_requirements(target_path)
 
-    def _derive_folder_name(self, repo_url: str) -> str:
-        name = repo_url.rstrip("/").split("/")[-1]
-        if name.endswith(".git"):
-            name = name[:-4]
-        return name
-
-    def _install_requirements(self, repo_path: Path):
+    def _install_requirements(self, repo_path: Path) -> None:
         requirements_file = repo_path / "requirements.txt"
         if not requirements_file.exists():
             return
+
         self.logger.info(f"[DEPS] Installing {repo_path.name}")
         try:
             subprocess.run(
                 [str(self.python_exec), "-m", "pip", "install",
-                 "-r", str(requirements_file), "--quiet",
-                 "--disable-pip-version-check", "--no-warn-script-location"],
+                 "-r", str(requirements_file),
+                 "--quiet",
+                 "--disable-pip-version-check",
+                 "--no-warn-script-location"],
                 check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
             )
-        except subprocess.CalledProcessError:
-            self.logger.warning(f"[DEPS-SKIPPED] {repo_path.name}")
+        except subprocess.CalledProcessError as e:
+            # Surface the actual pip error (last lines) instead of swallowing
+            # it -- the user otherwise gets a mysterious ImportError later.
+            stderr = (e.stderr or "").strip()
+            stderr_tail = "\n".join(stderr.splitlines()[-10:])
+            self.logger.warning(
+                f"[DEPS-SKIPPED] {repo_path.name} -- pip install failed:\n"
+                f"{stderr_tail or '(no stderr captured)'}"
+            )
+            self.install_failures.append((repo_path.name, stderr_tail))
 
 
 ================================================
@@ -1224,155 +2585,289 @@ FILE: search/rerank.py
 ================================================
 from sentence_transformers import CrossEncoder
 
+
 class Reranker:
     def __init__(self, model_name: str):
         self.model = CrossEncoder(model_name)
 
-    def rank(self, query: str, documents: list[str]):
-        if not documents:
+    def rank(self, query: str, documents):
+        """Return (best_doc, best_score) for the single highest-scoring doc."""
+        results = self.rank_top_k(query, documents, k=1)
+        if not results:
             return None, None
+        return results[0]
+
+    def rank_top_k(self, query: str, documents, k: int = 1):
+        """
+        Return up to `k` (doc, score) pairs ordered by score (best first).
+        Robust whether predict() returns a numpy array, torch tensor, or
+        plain list.
+        """
+        if not documents or k < 1:
+            return []
 
         pairs = [[query, doc] for doc in documents]
         scores = self.model.predict(pairs)
 
-        best_index = int(scores.argmax())
-        return documents[best_index], float(scores[best_index])
+        # Normalize to plain Python floats so the rest doesn't have to care
+        # whether the encoder returned numpy, torch, or a list.
+        if hasattr(scores, "tolist"):
+            score_list = [float(s) for s in scores.tolist()]
+        else:
+            score_list = [float(s) for s in scores]
 
+        ranked_idx = sorted(
+            range(len(score_list)),
+            key=lambda i: score_list[i],
+            reverse=True,
+        )
+        return [(documents[i], score_list[i]) for i in ranked_idx[:k]]
 
 
 ================================================
 FILE: search/semantic.py
 ================================================
+from typing import List, Optional, Dict
 from sentence_transformers import SentenceTransformer
 from chromadb import PersistentClient
 from .rerank import Reranker
 
 
 class SemanticSearcher:
-    def __init__(self, persist_dir, encoder_model, cross_encoder_model, top_k=10):
-        self.encoder = SentenceTransformer(encoder_model)
-        self.client = PersistentClient(path=str(persist_dir))
+    def __init__(
+        self,
+        persist_dir,
+        encoder_model,
+        cross_encoder_model,
+        top_k: int = 10,
+    ):
+        self.encoder    = SentenceTransformer(encoder_model)
+        self.client     = PersistentClient(path=str(persist_dir))
         self.collection = self.client.get_or_create_collection("tools")
-        self.reranker = Reranker(cross_encoder_model)
-        self.top_k = top_k
+        self.reranker   = Reranker(cross_encoder_model)
+        # Pool size pulled from ChromaDB before reranking.
+        self.top_k      = top_k
 
-    def batch_search(self, queries):
-        return [self.search(q) for q in queries]
+    # ==================================================
+    # PUBLIC API
+    # ==================================================
 
-    def search(self, query):
-        # 1️⃣ Embed
+    def batch_search(
+        self,
+        queries: List[str],
+        dedupe: bool = False,
+    ) -> List[Dict]:
+        """
+        Run search() over a list of queries. Returns one result dict per
+        query in the same order.
+
+        With dedupe=True, queries that resolve to a tool already returned
+        earlier in the batch get an empty result with `duplicate_of` set,
+        so callers can correlate by position without re-cloning the same
+        repo for multiple queries.
+        """
+        results: List[Dict] = []
+        seen_ids = set()
+        for q in queries:
+            r = self.search(q)
+            tool_id = r.get("tool_id")
+            if dedupe and tool_id and tool_id in seen_ids:
+                empty = self._empty_result(q)
+                empty["duplicate_of"] = tool_id
+                results.append(empty)
+                continue
+            if tool_id:
+                seen_ids.add(tool_id)
+            results.append(r)
+        return results
+
+    def search(self, query: str) -> Dict:
+        """Return the single best tool match for `query`, reranked."""
+        results = self.search_top_k(query, k=1)
+        if not results:
+            return self._empty_result(query)
+        return results[0]
+
+    def search_top_k(self, query: str, k: int = 1) -> List[Dict]:
+        """
+        Return up to `k` tool matches for `query`, reranked, best first.
+        Returns [] if nothing matches.
+        """
+        if k < 1:
+            return []
+
         embedding = self.encoder.encode([query])[0]
+        # Encoder may return numpy / torch tensor / list; normalize.
+        if hasattr(embedding, "tolist"):
+            embedding_list = embedding.tolist()
+        else:
+            embedding_list = list(embedding)
 
-        # 2️⃣ Retrieve top-k
-        results = self.collection.query(
-            query_embeddings=[embedding.tolist()],
+        retrieved = self.collection.query(
+            query_embeddings=[embedding_list],
             n_results=self.top_k,
             include=["documents"],
         )
 
-        docs = results["documents"][0] if results["documents"] else []
+        docs = retrieved["documents"][0] if retrieved.get("documents") else []
+        if not docs:
+            return []
 
-        # 3️⃣ Rerank
-        best_doc, best_score = self.reranker.rank(query, docs)
+        scored = self.reranker.rank_top_k(query, docs, k=k)
 
-        if not best_doc:
-            return {
-                "query": query,
-                "tool_id": None,
-                "tool_name": None,
-                "tool_description": None,
-                "tool_git_link": None,
-                "score": None,
-            }
+        results: List[Dict] = []
+        for doc, score in scored:
+            parsed = self._parse_chunk(doc)
+            results.append({"query": query, **parsed, "score": score})
+        return results
 
-        # 4️⃣ Parse structured fields
-        parsed = self._parse_chunk(best_doc)
+    # ==================================================
+    # INTERNAL
+    # ==================================================
 
+    @staticmethod
+    def _empty_result(query: str) -> Dict:
         return {
-            "query": query,
-            **parsed,
-            "score": best_score,
+            "query":            query,
+            "tool_id":          None,
+            "tool_name":        None,
+            "tool_description": None,
+            "tool_git_link":    None,
+            "score":            None,
         }
 
-    def _parse_chunk(self, chunk_text):
+    def _parse_chunk(self, chunk_text: str) -> Dict:
+        """
+        Parse a chunk into structured fields. Each field is taken from its
+        FIRST occurrence; later lines that happen to start with a prefix
+        (e.g. "Name:" appearing inside a Description) do not overwrite the
+        real field.
+        """
         result = {
-            "tool_id": None,
-            "tool_name": None,
+            "tool_id":          None,
+            "tool_name":        None,
             "tool_description": None,
-            "tool_git_link": None,
+            "tool_git_link":    None,
         }
+
+        prefixes = (
+            ("ID:",          "tool_id"),
+            ("Name:",        "tool_name"),
+            ("Description:", "tool_description"),
+            ("Git Link:",    "tool_git_link"),
+        )
 
         for line in chunk_text.split("\n"):
-            if line.startswith("ID:"):
-                result["tool_id"] = line.replace("ID:", "").strip()
-            elif line.startswith("Name:"):
-                result["tool_name"] = line.replace("Name:", "").strip()
-            elif line.startswith("Description:"):
-                result["tool_description"] = line.replace("Description:", "").strip()
-            elif line.startswith("Git Link:"):
-                result["tool_git_link"] = line.replace("Git Link:", "").strip()
+            for prefix, key in prefixes:
+                if result[key] is None and line.startswith(prefix):
+                    result[key] = line[len(prefix):].strip()
+                    break
 
         return result
-
 
 
 ================================================
 FILE: utils/env_merger.py
 ================================================
-import os
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Dict, Tuple
 
 logger = logging.getLogger("ToolStorePy")
+
+
+# -------------------------------------------------------
+# IO HELPERS
+# -------------------------------------------------------
+
+def _read_file_safely(path: Path) -> str:
+    """
+    Read a text file as UTF-8. If invalid bytes are present, replace them
+    and warn -- silent corruption is worse than a visible warning.
+    """
+    with open(path, "rb") as f:
+        raw = f.read()
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        logger.warning(
+            f"[ENV] Non-UTF-8 bytes in {path}; replaced with U+FFFD."
+        )
+        return raw.decode("utf-8", errors="replace")
+
+
+def _split_value_and_comment(rest: str) -> Tuple[str, str]:
+    """
+    Split the right-hand side of a `KEY=...` line into (value, inline_comment).
+    Handles quoted values so `#` inside quotes is preserved rather than
+    being treated as a comment delimiter.
+
+    Examples:
+        ' bar '                  -> ('bar', '')
+        ' bar # note'            -> ('bar', '# note')
+        ' "v # 1"'               -> ('"v # 1"', '')
+        ' "v # 1" # note'        -> ('"v # 1"', '# note')
+        " 'https://x/#frag'"     -> ("'https://x/#frag'", '')
+    """
+    rest = rest.lstrip()
+
+    if rest.startswith(('"', "'")):
+        quote = rest[0]
+        end_q = rest.find(quote, 1)
+        if end_q != -1:
+            value = rest[: end_q + 1]
+            tail  = rest[end_q + 1:].lstrip()
+            if tail.startswith("#"):
+                return value, "# " + tail[1:].strip()
+            return value, ""
+        # Unclosed quote -- treat the whole remainder as the value.
+        return rest.rstrip(), ""
+
+    if " #" in rest:
+        val_part, _, comment = rest.partition(" #")
+        return val_part.strip(), "# " + comment.strip()
+    return rest.strip(), ""
 
 
 # -------------------------------------------------------
 # PARSING
 # -------------------------------------------------------
 
-def _parse_env_example(path: Path) -> list[dict]:
+def _parse_env_example(path: Path) -> List[Dict]:
     """
-    Parse a .env.example file into a list of entries.
-    Each entry is one of:
+    Parse a .env.example file into a list of entries:
         {"type": "blank"}
         {"type": "comment",  "line": "# some comment"}
-        {"type": "key",      "key": "FOO", "value": "bar", "inline_comment": "# optional"}
+        {"type": "key",      "key": "FOO", "value": "bar",
+                             "inline_comment": "# optional"}
     """
-    entries = []
-    with open(path, "r", encoding="utf-8", errors="replace") as f:
-        for raw in f:
-            line = raw.rstrip("\n")
+    entries: List[Dict] = []
+    content = _read_file_safely(path)
 
-            if line.strip() == "":
-                entries.append({"type": "blank"})
-                continue
+    for raw in content.splitlines():
+        line = raw.rstrip("\r")
 
-            if line.strip().startswith("#"):
-                entries.append({"type": "comment", "line": line})
-                continue
+        if line.strip() == "":
+            entries.append({"type": "blank"})
+            continue
 
-            # KEY=value  # optional inline comment
-            if "=" in line:
-                key_part, _, rest = line.partition("=")
-                key = key_part.strip()
-                inline_comment = ""
-                if " #" in rest:
-                    val_part, _, inline_comment = rest.partition(" #")
-                    value = val_part.strip()
-                    inline_comment = "# " + inline_comment.strip()
-                else:
-                    value = rest.strip()
-                entries.append({
-                    "type":           "key",
-                    "key":            key,
-                    "value":          value,
-                    "inline_comment": inline_comment,
-                })
-                continue
-
-            # Unrecognised line â€” treat as comment
+        if line.strip().startswith("#"):
             entries.append({"type": "comment", "line": line})
+            continue
+
+        if "=" in line:
+            key_part, _, rest = line.partition("=")
+            value, inline_comment = _split_value_and_comment(rest)
+            entries.append({
+                "type":           "key",
+                "key":            key_part.strip(),
+                "value":          value,
+                "inline_comment": inline_comment,
+            })
+            continue
+
+        # Unrecognised non-empty line -- preserve as a comment.
+        entries.append({"type": "comment", "line": line})
 
     return entries
 
@@ -1381,14 +2876,23 @@ def _parse_env_example(path: Path) -> list[dict]:
 # SCANNING
 # -------------------------------------------------------
 
-def scan_env_examples(tools_dir: Path) -> dict[str, list[dict]]:
+def scan_env_examples(
+    tools_dir: Path,
+    skipped_repos: Optional[set] = None,
+) -> Dict[str, List[Dict]]:
     """
     Walk tools_dir and return {repo_name: parsed_entries} for every
-    .env.example found directly inside a repo root.
+    .env.example found directly inside a repo root. Skips hidden dirs
+    and any repo in `skipped_repos`.
     """
-    found = {}
+    skipped_repos = set(skipped_repos or [])
+    found: Dict[str, List[Dict]] = {}
     for repo_dir in sorted(tools_dir.iterdir()):
         if not repo_dir.is_dir():
+            continue
+        if repo_dir.name.startswith("."):
+            continue
+        if repo_dir.name in skipped_repos:
             continue
         env_example = repo_dir / ".env.example"
         if env_example.exists():
@@ -1398,30 +2902,39 @@ def scan_env_examples(tools_dir: Path) -> dict[str, list[dict]]:
 
 
 # -------------------------------------------------------
-# INTERACTIVE CONFLICT RESOLUTION
+# CONFLICT RESOLUTION
 # -------------------------------------------------------
 
-def _resolve_conflict(key: str, candidates: list[dict]) -> dict:
+def _resolve_conflict(key: str, candidates: List[Dict]) -> Dict:
     """
     Ask the user to choose between conflicting definitions of `key`.
-    `candidates` is a list of {"repo", "value", "inline_comment"} dicts.
-    Returns the chosen candidate (or a custom one).
+    Raises RuntimeError on EOF -- non-interactive callers should set
+    interactive=False on the merge function instead.
     """
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"  Conflict: key '{key}' is defined in multiple repos")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     for i, c in enumerate(candidates, 1):
         comment_str = f"  {c['inline_comment']}" if c["inline_comment"] else ""
         print(f"  [{i}] repo: {c['repo']}")
         print(f"       {key}={c['value']}{comment_str}")
-    print(f"  [{len(candidates)+1}] Enter a custom value")
+    print(f"  [{len(candidates) + 1}] Enter a custom value")
     print()
 
     while True:
         try:
-            raw = input(f"  Choose [1-{len(candidates)+1}]: ").strip()
+            raw = input(f"  Choose [1-{len(candidates) + 1}]: ").strip()
+        except EOFError:
+            raise RuntimeError(
+                f"Cannot prompt for .env.example conflict on key '{key}' "
+                f"in a non-interactive context. Re-run interactively, or "
+                f"call process_env_examples(..., interactive=False) to "
+                f"abort on conflicts instead of looping forever on EOF."
+            )
+
+        try:
             choice = int(raw)
-        except (ValueError, EOFError):
+        except ValueError:
             print("  Please enter a number.")
             continue
 
@@ -1429,41 +2942,56 @@ def _resolve_conflict(key: str, candidates: list[dict]) -> dict:
             return candidates[choice - 1]
 
         if choice == len(candidates) + 1:
-            custom_val = input(f"  Enter value for {key}: ").strip()
-            custom_comment = input(f"  Enter inline comment (leave blank for none): ").strip()
+            try:
+                custom_val = input(f"  Enter value for {key}: ").strip()
+                custom_comment = input(
+                    "  Enter inline comment (leave blank for none): "
+                ).strip()
+            except EOFError:
+                raise RuntimeError(
+                    f"Custom value prompt for '{key}' got EOF."
+                )
             return {
                 "repo":           "custom",
                 "value":          custom_val,
                 "inline_comment": f"# {custom_comment}" if custom_comment else "",
             }
 
-        print(f"  Invalid choice. Enter a number between 1 and {len(candidates)+1}.")
+        print(f"  Invalid choice. Enter a number between 1 and "
+              f"{len(candidates) + 1}.")
 
 
 # -------------------------------------------------------
 # MERGING
 # -------------------------------------------------------
 
+def _all_candidates_agree(candidates: List[Dict]) -> bool:
+    if len(candidates) <= 1:
+        return True
+    first_value = candidates[0]["value"]
+    return all(c["value"] == first_value for c in candidates)
+
+
 def merge_env_examples(
-    repo_entries: dict[str, list[dict]],
-) -> tuple[list[dict], list[str]]:
+    repo_entries: Dict[str, List[Dict]],
+    interactive: bool = True,
+) -> Tuple[List[str], List[str]]:
     """
     Merge parsed entries from multiple repos into a single ordered list.
 
-    Strategy:
-    - Non-key lines (blanks, comments) are kept per-repo under a repo header.
-    - Key entries are deduplicated; conflicts trigger an interactive prompt.
+    - Identical values across repos are auto-merged (no prompt).
+    - Real conflicts: prompt the user when interactive=True; otherwise
+      raise RuntimeError naming the key and the disagreeing repos.
 
     Returns:
-        merged  : list of output lines (strings)
-        all_keys: ordered list of all key names included
+        merged_lines : list[str] output lines for the merged file
+        all_keys     : list[str] key names included, in output order
     """
-    # First pass: collect all definitions per key across repos
-    key_candidates: dict[str, list[dict]] = {}  # key -> [{repo, value, inline_comment, context_comments}]
-    repo_structure: dict[str, list] = {}         # repo -> ordered entries with resolved keys
+    key_candidates: Dict[str, List[Dict]] = {}
+    repo_structure: Dict[str, List[Dict]] = {}
 
     for repo, entries in repo_entries.items():
-        pending_comments: list[str] = []
+        pending_comments: List[str] = []
         repo_structure[repo] = []
 
         for entry in entries:
@@ -1474,10 +3002,9 @@ def merge_env_examples(
             elif entry["type"] == "key":
                 key = entry["key"]
                 candidate = {
-                    "repo":             repo,
-                    "value":            entry["value"],
-                    "inline_comment":   entry["inline_comment"],
-                    "context_comments": list(pending_comments),
+                    "repo":           repo,
+                    "value":          entry["value"],
+                    "inline_comment": entry["inline_comment"],
                 }
                 key_candidates.setdefault(key, []).append(candidate)
                 repo_structure[repo].append({
@@ -1487,42 +3014,55 @@ def merge_env_examples(
                 })
                 pending_comments = []
 
-    # Second pass: resolve conflicts
-    resolved: dict[str, dict] = {}   # key -> chosen candidate
+    resolved: Dict[str, Dict] = {}
     for key, candidates in key_candidates.items():
         if len(candidates) == 1:
             resolved[key] = candidates[0]
+        elif _all_candidates_agree(candidates):
+            repos = ", ".join(c["repo"] for c in candidates)
+            logger.debug(
+                f"[ENV] Auto-merged '{key}' (identical value across "
+                f"{repos})."
+            )
+            resolved[key] = candidates[0]
         else:
-            resolved[key] = _resolve_conflict(key, candidates)
+            if interactive:
+                resolved[key] = _resolve_conflict(key, candidates)
+            else:
+                repos = ", ".join(c["repo"] for c in candidates)
+                raise RuntimeError(
+                    f"Conflicting values for '{key}' across repos "
+                    f"({repos}) in non-interactive mode."
+                )
 
-    # Third pass: build merged output lines
-    merged_lines: list[str] = []
-    all_keys: list[str] = []
-    seen_keys: set[str] = set()
+    merged_lines: List[str] = []
+    all_keys:     List[str] = []
+    seen_keys:    set       = set()
 
     for repo, structure in repo_structure.items():
-        # Repo header
         merged_lines.append("")
-        merged_lines.append(f"# {'â”€'*54}")
+        merged_lines.append("# " + "-" * 54)
         merged_lines.append(f"# Repo: {repo}")
-        merged_lines.append(f"# {'â”€'*54}")
+        merged_lines.append("# " + "-" * 54)
 
         for item in structure:
             key = item["key"]
             if key in seen_keys:
-                merged_lines.append(f"# (duplicate '{key}' from {repo} â€” skipped)")
+                merged_lines.append(
+                    f"# (duplicate '{key}' from {repo} -- skipped)"
+                )
                 continue
 
             seen_keys.add(key)
             all_keys.append(key)
 
-            # Context comments/blanks
             for c in item["context"]:
                 merged_lines.append(c)
 
             r = resolved[key]
-            # Attribution comment
-            if r["repo"] != repo:
+            if r["repo"] == "custom":
+                merged_lines.append("# ^ value chosen interactively")
+            elif r["repo"] != repo:
                 merged_lines.append(f"# ^ value chosen from repo: {r['repo']}")
 
             ic = f"  {r['inline_comment']}" if r["inline_comment"] else ""
@@ -1535,33 +3075,29 @@ def merge_env_examples(
 # .env VALIDATION
 # -------------------------------------------------------
 
-def _load_env_keys(env_path: Path) -> set[str]:
+def _load_env_keys(env_path: Path) -> set:
     """Return set of keys defined (non-empty) in an existing .env file."""
-    keys = set()
-    with open(env_path, "r", encoding="utf-8", errors="replace") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if "=" in line:
-                key, _, val = line.partition("=")
-                if val.strip():
-                    keys.add(key.strip())
+    keys: set = set()
+    content = _read_file_safely(env_path)
+    for line in content.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" in line:
+            key, _, val = line.partition("=")
+            if val.strip():
+                keys.add(key.strip())
     return keys
 
 
-def validate_env(
-    workspace: Path,
-    required_keys: list[str],
-) -> list[str]:
+def validate_env(workspace: Path, required_keys: List[str]) -> List[str]:
     """
-    If workspace/.env exists, return list of required_keys that are
-    missing or empty in it.  Returns [] if no .env present (no complaint).
+    If workspace/.env exists, return required_keys that are missing or
+    empty in it. Returns [] if no .env present.
     """
     env_path = workspace / ".env"
     if not env_path.exists():
         return []
-
     existing = _load_env_keys(env_path)
     return [k for k in required_keys if k not in existing]
 
@@ -1573,19 +3109,22 @@ def validate_env(
 def process_env_examples(
     tools_dir: Path,
     workspace: Path,
-) -> tuple[list[str], list[str]]:
+    skipped_repos: Optional[set] = None,
+    interactive: bool = True,
+) -> Tuple[List[str], List[str]]:
     """
     Full pipeline:
-      1. Scan repos for .env.example files
-      2. Merge (with interactive conflict resolution)
-      3. Write workspace/.env.example
-      4. Validate against workspace/.env if it exists
+      1. Scan repos for .env.example files (excluding `skipped_repos`).
+      2. Merge -- auto-resolve identical values; prompt or raise on real
+         conflicts based on `interactive`.
+      3. Write workspace/.env.example.
+      4. Validate against workspace/.env if present.
 
     Returns:
-        all_keys     : list of env var names found across all repos
+        all_keys     : env var names from all included repos
         missing_keys : keys absent/empty in workspace/.env ([] if no .env)
     """
-    repo_entries = scan_env_examples(tools_dir)
+    repo_entries = scan_env_examples(tools_dir, skipped_repos=skipped_repos)
 
     if not repo_entries:
         return [], []
@@ -1596,12 +3135,13 @@ def process_env_examples(
         + ", ".join(repos_with_env)
     )
 
-    merged_lines, all_keys = merge_env_examples(repo_entries)
+    merged_lines, all_keys = merge_env_examples(
+        repo_entries, interactive=interactive,
+    )
 
-    # Write merged .env.example
     out_path = workspace / ".env.example"
     header = [
-        "# ToolStorePy â€” merged .env.example",
+        "# ToolStorePy -- merged .env.example",
         "# Generated from .env.example files found in cloned tool repos.",
         "# Copy this file to .env and fill in the required values.",
         "#",
@@ -1611,15 +3151,569 @@ def process_env_examples(
     with open(out_path, "w", encoding="utf-8") as f:
         f.write("\n".join(header + merged_lines) + "\n")
 
-    logger.info(f"[ENV] Merged .env.example written â†’ {out_path}")
+    logger.info(f"[ENV] Merged .env.example written -> {out_path}")
 
     missing_keys = validate_env(workspace, all_keys)
-
     return all_keys, missing_keys
 
 
 ================================================
 FILE: utils/security_scanner.py
 ================================================
-Error reading file with 'cp1252': 'charmap' codec can't decode byte 0x90 in position 14026: character maps to <undefined>
+"""
+utils/security_scanner.py
+
+Static AST-based security scanner for cloned tool repositories.
+
+Rules are calibrated so that HIGH findings always indicate a concrete
+code-execution or RCE risk -- not just "this module exists in your
+imports." Common building blocks like `requests`, `hashlib`, or `print()`
+are LOW or not flagged at all. The build prompt only fires on HIGH.
+
+Severity tiers
+--------------
+HIGH    Actual dangerous calls: eval/exec/compile/__import__,
+        os.system/os.popen/os.exec*/os.spawn*,
+        subprocess.* with shell=True (plus subprocess.getoutput/
+        getstatusoutput, which always shell out),
+        pickle.loads/load, marshal.loads/load,
+        yaml.load without Loader=.
+
+MEDIUM  Capability imports (subprocess, pickle, raw network modules,
+        unsafe XML parsers) and dynamic reflection (getattr/setattr/
+        delattr/vars called with a non-literal name).
+
+LOW     HTTP-client / crypto-primitive / deprecated-module imports.
+        Informational only.
+
+Known limitations
+-----------------
+- Aliased imports defeat name-based detection: `from yaml import load as
+  L; L(...)` is not caught. Tracking import aliases is a larger change.
+- Only top-level module names are inspected against the import rules; a
+  star-imported symbol used directly (e.g. `from os import system; system(...)`)
+  is flagged via the call rule, but `from os import system as do` is not.
+"""
+
+import ast
+import os
+import datetime
+from pathlib import Path
+from dataclasses import dataclass, field
+from typing import List, Optional, Tuple
+
+
+# ============================================================
+# DATA STRUCTURES
+# ============================================================
+
+SEVERITY_ORDER = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
+
+
+@dataclass
+class Finding:
+    severity: str   # HIGH | MEDIUM | LOW
+    category: str
+    detail:   str
+    file:     str
+    line:     int
+
+
+@dataclass
+class RepoReport:
+    repo_name: str
+    findings:  List[Finding] = field(default_factory=list)
+
+    @property
+    def high_count(self)   -> int: return sum(1 for f in self.findings if f.severity == "HIGH")
+    @property
+    def medium_count(self) -> int: return sum(1 for f in self.findings if f.severity == "MEDIUM")
+    @property
+    def low_count(self)    -> int: return sum(1 for f in self.findings if f.severity == "LOW")
+    @property
+    def is_clean(self)     -> bool: return len(self.findings) == 0
+
+
+# ============================================================
+# RULE TABLES
+# ============================================================
+
+# (module_prefix, severity, category, detail_template)
+# Matched as exact module name or as a sub-module
+# (e.g. "urllib" matches "urllib", "urllib.request", etc.).
+IMPORT_RULES: List[Tuple[str, str, str, str]] = [
+    # MEDIUM -- capability surfaces worth audit
+    ("subprocess",   "MEDIUM", "Shell capability",
+        "Imports '{mod}' (shell/process execution capability)"),
+    ("commands",     "MEDIUM", "Shell capability",
+        "Imports '{mod}' (deprecated; shell execution capability)"),
+
+    ("pickle",       "MEDIUM", "Deserialization capability",
+        "Imports '{mod}' (can deserialize arbitrary objects)"),
+    ("cPickle",      "MEDIUM", "Deserialization capability",
+        "Imports '{mod}' (can deserialize arbitrary objects)"),
+    ("marshal",      "MEDIUM", "Deserialization capability",
+        "Imports '{mod}' (can deserialize arbitrary objects)"),
+    ("shelve",       "MEDIUM", "Deserialization capability",
+        "Imports '{mod}' (pickle-backed key-value store)"),
+
+    ("socket",       "MEDIUM", "Raw network",
+        "Imports '{mod}' (low-level network sockets)"),
+    ("socketserver", "MEDIUM", "Raw network",
+        "Imports '{mod}' (low-level network server)"),
+    ("ftplib",       "MEDIUM", "Raw network",
+        "Imports '{mod}' (FTP client)"),
+    ("smtplib",      "MEDIUM", "Raw network",
+        "Imports '{mod}' (SMTP client)"),
+    ("telnetlib",    "MEDIUM", "Raw network",
+        "Imports '{mod}' (Telnet client; deprecated)"),
+    ("imaplib",      "MEDIUM", "Raw network",
+        "Imports '{mod}' (IMAP client)"),
+    ("poplib",       "MEDIUM", "Raw network",
+        "Imports '{mod}' (POP3 client)"),
+    ("nntplib",      "MEDIUM", "Raw network",
+        "Imports '{mod}' (NNTP client; deprecated)"),
+
+    ("xml.etree",    "MEDIUM", "XML parsing (potentially unsafe)",
+        "Imports '{mod}' (may be vulnerable to XXE; consider defusedxml)"),
+    ("xml.sax",      "MEDIUM", "XML parsing (potentially unsafe)",
+        "Imports '{mod}' (may be vulnerable to XXE; consider defusedxml)"),
+    ("xml.dom",      "MEDIUM", "XML parsing (potentially unsafe)",
+        "Imports '{mod}' (may be vulnerable to XXE; consider defusedxml)"),
+    ("lxml",         "MEDIUM", "XML parsing (potentially unsafe)",
+        "Imports '{mod}' (use defusedxml.lxml or set resolve_entities=False)"),
+
+    # LOW -- common and expected; informational only
+    ("requests",     "LOW", "HTTP client",
+        "Imports '{mod}' (outbound HTTP)"),
+    ("urllib",       "LOW", "HTTP client",
+        "Imports '{mod}' (outbound HTTP)"),
+    ("urllib2",      "LOW", "HTTP client",
+        "Imports '{mod}' (outbound HTTP; Py2-era)"),
+    ("urllib3",      "LOW", "HTTP client",
+        "Imports '{mod}' (outbound HTTP)"),
+    ("http.client",  "LOW", "HTTP client",
+        "Imports '{mod}' (outbound HTTP)"),
+    ("httpx",        "LOW", "HTTP client",
+        "Imports '{mod}' (outbound HTTP)"),
+    ("aiohttp",      "LOW", "HTTP client",
+        "Imports '{mod}' (outbound HTTP)"),
+
+    ("hashlib",      "LOW", "Cryptographic primitives",
+        "Imports '{mod}' (ensure correct algorithm and usage)"),
+    ("hmac",         "LOW", "Cryptographic primitives",
+        "Imports '{mod}' (ensure correct algorithm and usage)"),
+    ("ssl",          "LOW", "Cryptographic primitives",
+        "Imports '{mod}' (verify cert handling)"),
+    ("secrets",      "LOW", "Cryptographic primitives",
+        "Imports '{mod}' (CSPRNG)"),
+    ("crypt",        "LOW", "Cryptographic primitives",
+        "Imports '{mod}' (legacy crypt(3); deprecated)"),
+
+    ("cgi",          "LOW", "Deprecated module",
+        "Imports '{mod}' (deprecated)"),
+    ("cgitb",        "LOW", "Deprecated module",
+        "Imports '{mod}' (deprecated)"),
+    ("optparse",     "LOW", "Deprecated module",
+        "Imports '{mod}' (superseded by argparse)"),
+]
+
+
+# HIGH calls: always dangerous regardless of arguments.
+DYNAMIC_EXEC_CALLS = {"eval", "exec", "compile", "__import__"}
+
+OS_SHELL_CALLS = {
+    "os.system", "os.popen",
+    "os.execv",  "os.execve", "os.execvp", "os.execvpe",
+    "os.execlp", "os.execlpe",
+    "os.spawnl", "os.spawnle", "os.spawnlp", "os.spawnlpe",
+    "os.spawnv", "os.spawnve", "os.spawnvp", "os.spawnvpe",
+}
+
+# These wrap a shell unconditionally (no shell= kwarg to check).
+ALWAYS_SHELL_SUBPROCESS = {
+    "subprocess.getoutput",
+    "subprocess.getstatusoutput",
+}
+
+# These are HIGH only when called with shell=True.
+SHELL_OPTIONAL_SUBPROCESS = {
+    "subprocess.run", "subprocess.call",
+    "subprocess.check_call", "subprocess.check_output",
+    "subprocess.Popen",
+}
+
+UNSAFE_DESERIALIZE_CALLS = {
+    "pickle.loads",  "pickle.load",
+    "cPickle.loads", "cPickle.load",
+    "marshal.loads", "marshal.load",
+}
+
+# MEDIUM: only when called with a non-literal attribute name.
+REFLECTION_CALLS = {"getattr", "setattr", "delattr", "vars"}
+
+# LOW/MEDIUM: only when the call mentions a sensitive keyword.
+LOGGING_CALLS = {
+    "print",
+    "logging.info", "logging.debug", "logging.warning",
+    "logging.error", "logging.critical",
+}
+
+SENSITIVE_KEYWORDS = (
+    "password", "passwd", "secret", "token", "api_key", "apikey",
+    "auth", "credential", "private_key", "bearer",
+)
+
+
+# ============================================================
+# AST HELPERS
+# ============================================================
+
+def _call_name(node: ast.Call) -> Optional[str]:
+    """
+    Resolve 'foo' / 'foo.bar' / 'foo.bar.baz' from a Call node.
+    Returns None for callables we can't statically name.
+    """
+    func = node.func
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        parts: List[str] = []
+        cur: ast.AST = func
+        while isinstance(cur, ast.Attribute):
+            parts.append(cur.attr)
+            cur = cur.value
+        if isinstance(cur, ast.Name):
+            parts.append(cur.id)
+            return ".".join(reversed(parts))
+    return None
+
+
+def _import_module_names(node) -> List[str]:
+    if isinstance(node, ast.Import):
+        return [alias.name for alias in node.names]
+    if isinstance(node, ast.ImportFrom):
+        return [node.module or ""]
+    return []
+
+
+# ============================================================
+# VISITOR
+# ============================================================
+
+class _SecurityVisitor(ast.NodeVisitor):
+
+    def __init__(self, rel_path: str):
+        self.rel_path = rel_path
+        self.findings: List[Finding] = []
+
+    # ---- imports --------------------------------------------
+
+    def visit_Import(self, node):
+        self._check_imports(node)
+        self.generic_visit(node)
+
+    def visit_ImportFrom(self, node):
+        self._check_imports(node)
+        self.generic_visit(node)
+
+    def _check_imports(self, node):
+        for mod in _import_module_names(node):
+            if not mod:
+                continue
+            for prefix, sev, cat, tpl in IMPORT_RULES:
+                if mod == prefix or mod.startswith(prefix + "."):
+                    self._emit(node, sev, cat, tpl.format(mod=mod))
+                    break
+
+    # ---- calls ----------------------------------------------
+
+    def visit_Call(self, node):
+        name = _call_name(node)
+        if name:
+            self._check_call(node, name)
+        self.generic_visit(node)
+
+    def _check_call(self, node: ast.Call, name: str):
+        if name in DYNAMIC_EXEC_CALLS:
+            self._emit(node, "HIGH", "Dynamic code execution",
+                       f"Call to '{name}' executes arbitrary code")
+            return
+
+        if name in OS_SHELL_CALLS:
+            self._emit(node, "HIGH", "Shell execution",
+                       f"Call to '{name}' executes a shell command")
+            return
+
+        if name in ALWAYS_SHELL_SUBPROCESS:
+            self._emit(node, "HIGH", "Shell execution",
+                       f"Call to '{name}' always invokes a shell")
+            return
+
+        if name in SHELL_OPTIONAL_SUBPROCESS and self._has_shell_true(node):
+            self._emit(node, "HIGH", "Shell injection vector",
+                       f"'{name}' called with shell=True is a shell-injection risk")
+            return
+
+        if name in UNSAFE_DESERIALIZE_CALLS:
+            self._emit(node, "HIGH", "Unsafe deserialization",
+                       f"'{name}' deserialises untrusted data (RCE risk)")
+            return
+
+        if name == "yaml.load" and self._yaml_load_unsafe(node):
+            self._emit(node, "HIGH", "Unsafe deserialization",
+                       "yaml.load() without Loader= is unsafe (use yaml.safe_load)")
+            return
+
+        if name in REFLECTION_CALLS and self._has_dynamic_name_arg(node):
+            self._emit(node, "MEDIUM", "Dynamic reflection",
+                       f"'{name}' called with a non-literal attribute name")
+            return
+
+        if name in LOGGING_CALLS and self._contains_sensitive_keyword(node):
+            self._emit(node, "MEDIUM", "Potential secret logging",
+                       f"'{name}' argument mentions a sensitive keyword "
+                       f"(password/token/key)")
+            return
+
+    # ---- semantic predicates --------------------------------
+
+    @staticmethod
+    def _has_shell_true(call: ast.Call) -> bool:
+        for kw in call.keywords:
+            if kw.arg == "shell" \
+                    and isinstance(kw.value, ast.Constant) \
+                    and kw.value.value is True:
+                return True
+        return False
+
+    @staticmethod
+    def _yaml_load_unsafe(call: ast.Call) -> bool:
+        # Loader can be positional (yaml.load(data, SafeLoader)) or kw
+        # (yaml.load(data, Loader=SafeLoader)). Missing entirely => unsafe.
+        if not (call.args or call.keywords):
+            return False
+        if len(call.args) >= 2:
+            return False
+        for kw in call.keywords:
+            if kw.arg == "Loader":
+                return False
+        return True
+
+    @staticmethod
+    def _has_dynamic_name_arg(call: ast.Call) -> bool:
+        if len(call.args) < 2:
+            return False
+        name_arg = call.args[1]
+        if isinstance(name_arg, ast.Constant) and isinstance(name_arg.value, str):
+            return False
+        return True
+
+    @staticmethod
+    def _contains_sensitive_keyword(call: ast.Call) -> bool:
+        try:
+            src = ast.unparse(call)
+        except Exception:
+            return False
+        src_lower = src.lower()
+        return any(kw in src_lower for kw in SENSITIVE_KEYWORDS)
+
+    # ---- emit -----------------------------------------------
+
+    def _emit(self, node, severity: str, category: str, detail: str):
+        self.findings.append(Finding(
+            severity=severity,
+            category=category,
+            detail=detail,
+            file=self.rel_path,
+            line=getattr(node, "lineno", 0),
+        ))
+
+
+# ============================================================
+# FILE / REPO SCANNING
+# ============================================================
+
+def _scan_file(file_path: Path, repo_root: Path) -> List[Finding]:
+    try:
+        source = file_path.read_text(encoding="utf-8", errors="replace")
+        tree   = ast.parse(source, filename=str(file_path))
+    except (SyntaxError, ValueError):
+        return []
+
+    rel = str(file_path.relative_to(repo_root))
+    visitor = _SecurityVisitor(rel_path=rel)
+    visitor.visit(tree)
+    return visitor.findings
+
+
+def scan_repo(repo_dir: Path) -> RepoReport:
+    report = RepoReport(repo_name=repo_dir.name)
+    for root, _, files in os.walk(repo_dir):
+        for fname in files:
+            if not fname.endswith(".py"):
+                continue
+            fpath = Path(root) / fname
+            report.findings.extend(_scan_file(fpath, repo_dir))
+
+    report.findings.sort(key=lambda f: (
+        SEVERITY_ORDER.get(f.severity, 99),
+        f.file,
+        f.line,
+    ))
+    return report
+
+
+def scan_all_repos(tools_dir: Path) -> List[RepoReport]:
+    reports: List[RepoReport] = []
+    for repo_dir in sorted(tools_dir.iterdir()):
+        if not repo_dir.is_dir() or repo_dir.name.startswith("."):
+            continue
+        reports.append(scan_repo(repo_dir))
+    return reports
+
+
+# ============================================================
+# REPORT RENDERING (plain ASCII)
+# ============================================================
+
+def render_report_text(reports: List[RepoReport]) -> str:
+    """
+    Plain-ASCII render. No box-drawing chars or emoji, so alignment can't
+    drift across terminals that size Unicode glyphs differently.
+    """
+    sep_outer = "=" * 70
+    sep_inner = "-" * 70
+
+    lines: List[str] = []
+    lines.append(sep_outer)
+    lines.append(" TOOLSTOREPY -- SECURITY SCAN REPORT")
+    lines.append(f" Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append(sep_outer)
+    lines.append("")
+
+    total_high = total_med = total_low = 0
+
+    for rep in reports:
+        total_high += rep.high_count
+        total_med  += rep.medium_count
+        total_low  += rep.low_count
+
+        if rep.is_clean:
+            status = "CLEAN"
+        elif rep.high_count:
+            status = "HIGH risk"
+        elif rep.medium_count:
+            status = "MEDIUM risk"
+        else:
+            status = "LOW risk"
+
+        lines.append(sep_inner)
+        lines.append(f"  Repo:    {rep.repo_name}")
+        lines.append(f"  Status:  {status}")
+        lines.append(
+            f"  Findings -- HIGH: {rep.high_count}  "
+            f"MEDIUM: {rep.medium_count}  LOW: {rep.low_count}"
+        )
+        lines.append(sep_inner)
+
+        if rep.is_clean:
+            lines.append("  No issues found.")
+            lines.append("")
+            continue
+
+        for sev in ("HIGH", "MEDIUM", "LOW"):
+            group = [f for f in rep.findings if f.severity == sev]
+            if not group:
+                continue
+            lines.append(f"  [{sev}]")
+            for f in group:
+                lines.append(f"    {f.file}:{f.line}  ({f.category})")
+                lines.append(f"      -> {f.detail}")
+            lines.append("")
+
+    lines.append(sep_outer)
+    lines.append(" SUMMARY")
+    lines.append(sep_outer)
+    lines.append(f"  Repos scanned : {len(reports)}")
+    lines.append(f"  HIGH          : {total_high}")
+    lines.append(f"  MEDIUM        : {total_med}")
+    lines.append(f"  LOW           : {total_low}")
+    lines.append(f"  Clean repos   : {sum(1 for r in reports if r.is_clean)}")
+    lines.append(sep_outer)
+
+    return "\n".join(lines)
+
+
+# ============================================================
+# INTERACTIVE GATING
+# ============================================================
+
+def prompt_user_for_risky_repos(
+    reports: List[RepoReport],
+    interactive: bool = True,
+) -> Tuple[List[str], List[str]]:
+    """
+    For every repo with HIGH findings, ask the user whether to include
+    or skip it. With interactive=False (e.g. CI), any repo with HIGH
+    findings is auto-skipped.
+
+    Returns:
+        allowed_repos : repo names approved for the build
+        skipped_repos : repo names excluded from the build
+    """
+    risky = [r for r in reports if r.high_count > 0]
+
+    if not risky:
+        return [r.repo_name for r in reports], []
+
+    if not interactive:
+        allowed = [r.repo_name for r in reports if r.high_count == 0]
+        skipped = [r.repo_name for r in reports if r.high_count > 0]
+        return allowed, skipped
+
+    allowed: List[str] = []
+    skipped: List[str] = []
+
+    print()
+    print("-" * 68)
+    print("  HIGH-SEVERITY FINDINGS REQUIRE YOUR DECISION")
+    print("-" * 68)
+
+    for rep in reports:
+        if rep.high_count == 0:
+            allowed.append(rep.repo_name)
+            continue
+
+        print()
+        print(f"  Repo: {rep.repo_name}")
+        print(f"  HIGH findings: {rep.high_count}")
+        for f in rep.findings:
+            if f.severity == "HIGH":
+                print(f"    - {f.file}:{f.line}  ({f.category})")
+                print(f"        -> {f.detail}")
+
+        print()
+        while True:
+            try:
+                ans = input(
+                    f"  Include '{rep.repo_name}' despite HIGH findings? "
+                    f"[y/N]: "
+                ).strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                ans = "n"
+                print()
+
+            if ans in ("y", "yes"):
+                allowed.append(rep.repo_name)
+                print(f"  -> '{rep.repo_name}' included.")
+                break
+            elif ans in ("n", "no", ""):
+                skipped.append(rep.repo_name)
+                print(f"  -> '{rep.repo_name}' skipped.")
+                break
+            else:
+                print("  Please enter y or n.")
+
+    return allowed, skipped
 
